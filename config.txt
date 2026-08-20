@@ -1,0 +1,11 @@
+# Data cache capacity
+buffer_size=1000
+
+# Collision-event capture window (seconds)
+enable_collision_event=true
+event_pre_time=5
+event_post_time=5
+
+# Sensor records to print when the event is handled
+record_camera=true
+record_lidar=true
