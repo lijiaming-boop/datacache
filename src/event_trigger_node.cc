@@ -18,7 +18,7 @@ public:
 
         requestService_ = create_service<std_srvs::srv::Trigger>(
             "/request_trigger",
-            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
                 // Trigger.srv 的 Request 为空，无法携带事件名，使用节点参数 event_name
                 const std::string name = eventName_;

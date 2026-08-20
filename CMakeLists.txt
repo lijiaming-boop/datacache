@@ -41,8 +41,11 @@ endforeach()
 # 各节点额外的库依赖
 target_link_libraries(camera_node ${OpenCV_LIBS})
 target_link_libraries(camera_node cv_bridge::cv_bridge)
+
+# pcl_conversions 必须走 ament_target_dependencies 才能带出头文件路径
+ament_target_dependencies(lidar_sim_node pcl_conversions)
+target_include_directories(lidar_sim_node PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(lidar_sim_node ${PCL_LIBRARIES})
-target_link_libraries(lidar_sim_node pcl_conversions)
 
 install(TARGETS datacache_node camera_node lidar_sim_node event_trigger_node
   DESTINATION lib/${PROJECT_NAME})
