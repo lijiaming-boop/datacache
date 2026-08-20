@@ -42,6 +42,9 @@ public:
     }
 
 private:
+    // 异步发送触发请求：服务/定时器回调线程里不能同步等待结果
+    // （节点已在执行器里 spin，重入 spin_until_future_complete 会抛异常），
+    // 结果通过完成回调在执行器线程里打印
     bool sendTrigger(const std::string& eventName) {
         if (!client_->wait_for_service(std::chrono::seconds(1))) {
             RCLCPP_WARN(get_logger(), "/trigger_event service not available");
@@ -49,22 +52,16 @@ private:
         }
 
         auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-
-        auto future = client_->async_send_request(request);
-        if (rclcpp::spin_until_future_complete(get_node_base_interface(), future,
-                                               std::chrono::seconds(3))
-            != rclcpp::FutureReturnCode::SUCCESS) {
-            RCLCPP_WARN(get_logger(), "Trigger request timed out");
-            return false;
-        }
-
-        const auto result = future.get();
-        if (result->success) {
-            RCLCPP_INFO(get_logger(), "Event triggered: %s", result->message.c_str());
-        } else {
-            RCLCPP_WARN(get_logger(), "Trigger failed: %s", result->message.c_str());
-        }
-        return result->success;
+        client_->async_send_request(request,
+            [this, eventName](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+                const auto result = future.get();
+                if (result->success) {
+                    RCLCPP_INFO(get_logger(), "Event triggered: %s", result->message.c_str());
+                } else {
+                    RCLCPP_WARN(get_logger(), "Trigger failed: %s", result->message.c_str());
+                }
+            });
+        return true;
     }
 
     std::string eventName_;
