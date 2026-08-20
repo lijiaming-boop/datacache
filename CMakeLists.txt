@@ -5,7 +5,9 @@ if(POLICY CMP0144)
   cmake_policy(SET CMP0144 NEW)
 endif()
 
-project(datacache LANGUAGES CXX)
+# 必须启用 C 语言：Ubuntu 24.04 的 VTK::mpi 链接接口引用 MPI::MPI_C（C 绑定），
+# 纯 CXX 工程里 find_package(MPI) 只定义 MPI::MPI_CXX，会导致 VTK 报 target not found
+project(datacache LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,9 +19,8 @@ find_package(std_srvs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
-# 必须在 pcl_conversions/PCL 之前查找：VTK 的 VTK::mpi 目标链接 MPI::MPI_C，
-# 系统 MPI 开发库缺失时 VTK-targets.cmake 会直接报 "target was not found"
-find_package(MPI REQUIRED)
+# 必须在 pcl_conversions/PCL 之前查找，且显式要求 C、CXX 两种绑定
+find_package(MPI REQUIRED COMPONENTS C CXX)
 
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io)
