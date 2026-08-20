@@ -20,7 +20,8 @@ public:
             "/request_trigger",
             [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                const std::string name = request->message.empty() ? eventName_ : request->message;
+                // Trigger.srv 的 Request 为空，无法携带事件名，使用节点参数 event_name
+                const std::string name = eventName_;
                 const bool ok = sendTrigger(name);
                 response->success = ok;
                 response->message = ok
@@ -48,7 +49,6 @@ private:
         }
 
         auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-        request->message = eventName;
 
         auto future = client_->async_send_request(request);
         if (rclcpp::spin_until_future_complete(get_node_base_interface(), future,

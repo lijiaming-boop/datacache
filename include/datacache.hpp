@@ -57,7 +57,8 @@ public:
             "/trigger_event",
             [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                const std::string eventName = request->message.empty() ? "collision" : request->message;
+                // Trigger.srv 的 Request 为空，无法携带事件名，触发默认的 collision 事件
+                const std::string eventName = "collision";
                 const bool triggered = eventMonitor_->triggerEvent(eventName);
                 response->success = triggered;
                 response->message = triggered
