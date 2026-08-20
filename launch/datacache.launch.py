@@ -1,14 +1,19 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('config_path', default_value='config.txt',
+        DeclareLaunchArgument('config_path',
+                              default_value=PathJoinSubstitution([
+                                  FindPackageShare('datacache'), 'config.txt']),
                               description='Path to config file'),
-        DeclareLaunchArgument('pcd_path', default_value='pcd/sample.pcd',
+        DeclareLaunchArgument('pcd_path',
+                              default_value=PathJoinSubstitution([
+                                  FindPackageShare('datacache'), 'pcd', 'sample.pcd']),
                               description='Path to PCD file for lidar simulation'),
         DeclareLaunchArgument('camera_fps', default_value='30',
                               description='Camera capture frame rate'),
