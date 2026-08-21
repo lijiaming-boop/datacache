@@ -1,0 +1,5 @@
+# Event name to trigger, for example: collision or hard_brake
+string event_name
+---
+bool success
+string message

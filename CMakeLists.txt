@@ -15,9 +15,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(Threads REQUIRED)
+find_path(ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
+find_library(ZSTD_LIBRARY NAMES zstd REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/EventTrigger.srv"
+)
 
 # 必须在 pcl_conversions/PCL 之前查找，且显式要求 C、CXX 两种绑定
 find_package(MPI REQUIRED COMPONENTS C CXX)
@@ -35,12 +42,18 @@ foreach(target datacache_node camera_node lidar_sim_node event_trigger_node)
   target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   ament_target_dependencies(${target}
-    rclcpp sensor_msgs std_srvs)
+    rclcpp sensor_msgs)
 endforeach()
+
+rosidl_target_interfaces(datacache_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(event_trigger_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # 各节点额外的库依赖
 target_link_libraries(camera_node ${OpenCV_LIBS})
 target_link_libraries(camera_node cv_bridge::cv_bridge)
+target_link_libraries(datacache_node Threads::Threads)
+target_include_directories(datacache_node PRIVATE ${ZSTD_INCLUDE_DIR})
+target_link_libraries(datacache_node ${ZSTD_LIBRARY})
 
 # pcl_conversions 必须走 ament_target_dependencies 才能带出头文件路径
 ament_target_dependencies(lidar_sim_node pcl_conversions)
