@@ -3,7 +3,7 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
-#include <std_srvs/srv/trigger.hpp>
+#include "datacache/srv/event_trigger.hpp"
 
 class EventTriggerNode : public rclcpp::Node {
 public:
@@ -14,18 +14,16 @@ public:
         const int interval = get_parameter("interval").as_int();
         eventName_ = get_parameter("event_name").as_string();
 
-        client_ = create_client<std_srvs::srv::Trigger>("/trigger_event");
+        client_ = create_client<datacache::srv::EventTrigger>("/trigger_event");
 
-        requestService_ = create_service<std_srvs::srv::Trigger>(
+        requestService_ = create_service<datacache::srv::EventTrigger>(
             "/request_trigger",
-            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
-                   std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-                // Trigger.srv 的 Request 为空，无法携带事件名，使用节点参数 event_name
-                const std::string name = eventName_;
-                const bool ok = sendTrigger(name);
-                response->success = ok;
-                response->message = ok
-                    ? "Forwarded event '" + name + "' to datacache_node"
+            [this](const std::shared_ptr<datacache::srv::EventTrigger::Request> request,
+                   std::shared_ptr<datacache::srv::EventTrigger::Response> response) {
+                const auto name = request->event_name.empty() ? eventName_ : request->event_name;
+                response->success = sendTrigger(name);
+                response->message = response->success
+                    ? "Queued event '" + name + "' for datacache_node"
                     : "Failed to reach datacache_node";
             });
 
@@ -51,9 +49,10 @@ private:
             return false;
         }
 
-        auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+        auto request = std::make_shared<datacache::srv::EventTrigger::Request>();
+        request->event_name = eventName;
         client_->async_send_request(request,
-            [this, eventName](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            [this, eventName](rclcpp::Client<datacache::srv::EventTrigger>::SharedFuture future) {
                 const auto result = future.get();
                 if (result->success) {
                     RCLCPP_INFO(get_logger(), "Event triggered: %s", result->message.c_str());
@@ -65,8 +64,8 @@ private:
     }
 
     std::string eventName_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr client_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr requestService_;
+    rclcpp::Client<datacache::srv::EventTrigger>::SharedPtr client_;
+    rclcpp::Service<datacache::srv::EventTrigger>::SharedPtr requestService_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 
