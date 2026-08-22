@@ -322,7 +322,7 @@ private:
                     if (converted) {
                         convertedFileName = (convertedDirectory.filename() /
                             (baseName + (record.type == SensorType::CAMERA
-                                ? imageExtension(job.imageFormat) : ".pcd")).string();
+                                ? imageExtension(job.imageFormat) : ".pcd"))).string();
                     }
                 }
             }

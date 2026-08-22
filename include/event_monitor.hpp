@@ -37,7 +37,7 @@ public:
           logger_(std::move(logger)), clock_(std::move(clock)), node_(node),
           storageWorker_(std::make_unique<RawStorageWorker>(logger_,
               static_cast<std::size_t>(std::max(1, configManager_->getIntConfig(
-                  "max_pending_storage_jobs", 20)))),
+                  "max_pending_storage_jobs", 20))))),
           maxActiveCaptures_(static_cast<std::size_t>(std::max(1, configManager_->getIntConfig(
               "max_active_event_captures", 16)))),
           schedulerTimer_(node_->create_wall_timer(
