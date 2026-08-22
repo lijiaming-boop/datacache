@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include <rclcpp/time.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -17,25 +18,53 @@ class ApproximateSynchronizer {
 public:
     using Image = sensor_msgs::msg::Image;
     using PointCloud = sensor_msgs::msg::PointCloud2;
-    using MatchCallback = std::function<void(const Image::SharedPtr&, const PointCloud::SharedPtr&)>;
+    using MatchCallback = std::function<void(const Image::SharedPtr&, const PointCloud::SharedPtr&,
+                                              rclcpp::Duration)>;
+    using DropCallback = std::function<void(const std::string&, const rclcpp::Time&,
+                                             std::uint64_t, const std::string&)>;
 
     ApproximateSynchronizer(std::size_t queueSize, rclcpp::Duration tolerance,
-                            MatchCallback callback)
+                            MatchCallback callback, DropCallback dropCallback = {})
         : queueSize_(std::max<std::size_t>(1, queueSize)),
-          tolerance_(tolerance), callback_(std::move(callback)) {}
+          tolerance_(tolerance), callback_(std::move(callback)),
+          dropCallback_(std::move(dropCallback)) {}
 
     void addImage(const Image::SharedPtr& image) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (images_.size() >= queueSize_) {
+            const auto droppedTimestamp = stamp(images_.front());
+            images_.pop_front();
+            reportDrop("camera", droppedTimestamp, "synchronizer queue full");
+        }
         images_.push_back(image);
-        trimQueue(images_);
         tryMatch();
     }
 
     void addPointCloud(const PointCloud::SharedPtr& cloud) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (clouds_.size() >= queueSize_) {
+            const auto droppedTimestamp = stamp(clouds_.front());
+            clouds_.pop_front();
+            reportDrop("lidar", droppedTimestamp, "synchronizer queue full");
+        }
         clouds_.push_back(cloud);
-        trimQueue(clouds_);
         tryMatch();
+    }
+
+    // Finalize messages waiting at an event boundary. They remain in the raw
+    // sensor buffer, but are explicitly represented as single-sided records.
+    void flushUnmatched(const std::string& reason = "event window closed") {
+        std::lock_guard<std::mutex> lock(mutex_);
+        while (!images_.empty()) {
+            const auto timestamp = stamp(images_.front());
+            images_.pop_front();
+            reportDrop("camera", timestamp, reason);
+        }
+        while (!clouds_.empty()) {
+            const auto timestamp = stamp(clouds_.front());
+            clouds_.pop_front();
+            reportDrop("lidar", timestamp, reason);
+        }
     }
 
 private:
@@ -44,10 +73,12 @@ private:
         return rclcpp::Time(message->header.stamp);
     }
 
-    template<typename Message>
-    void trimQueue(std::deque<std::shared_ptr<Message>>& queue) {
-        while (queue.size() > queueSize_) {
-            queue.pop_front();
+    void reportDrop(const std::string& sensor, const rclcpp::Time& timestamp,
+                    const std::string& reason) {
+        auto& count = sensor == "camera" ? droppedImages_ : droppedClouds_;
+        ++count;
+        if (dropCallback_) {
+            dropCallback_(sensor, timestamp, count, reason);
         }
     }
 
@@ -78,16 +109,20 @@ private:
                 const auto cloud = *bestCloud;
                 images_.erase(bestImage);
                 clouds_.erase(bestCloud);
-                callback_(image, cloud);
+                callback_(image, cloud, rclcpp::Duration::from_nanoseconds(bestDifference));
                 continue;
             }
 
             // The oldest message cannot be matched by a future message if it is
             // already older than the newest message on the other side.
             if (stamp(images_.front()) < stamp(clouds_.front())) {
+                const auto droppedTimestamp = stamp(images_.front());
                 images_.pop_front();
+                reportDrop("camera", droppedTimestamp, "outside synchronization tolerance");
             } else {
+                const auto droppedTimestamp = stamp(clouds_.front());
                 clouds_.pop_front();
+                reportDrop("lidar", droppedTimestamp, "outside synchronization tolerance");
             }
         }
     }
@@ -95,7 +130,10 @@ private:
     std::size_t queueSize_;
     rclcpp::Duration tolerance_;
     MatchCallback callback_;
+    DropCallback dropCallback_;
     std::deque<Image::SharedPtr> images_;
     std::deque<PointCloud::SharedPtr> clouds_;
     std::mutex mutex_;
+    std::uint64_t droppedImages_{0};
+    std::uint64_t droppedClouds_{0};
 };

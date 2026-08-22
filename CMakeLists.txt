@@ -54,6 +54,10 @@ target_link_libraries(camera_node cv_bridge::cv_bridge)
 target_link_libraries(datacache_node Threads::Threads)
 target_include_directories(datacache_node PRIVATE ${ZSTD_INCLUDE_DIR})
 target_link_libraries(datacache_node ${ZSTD_LIBRARY})
+target_link_libraries(datacache_node ${OpenCV_LIBS})
+target_include_directories(datacache_node PRIVATE ${PCL_INCLUDE_DIRS})
+target_link_libraries(datacache_node ${PCL_LIBRARIES})
+ament_target_dependencies(datacache_node pcl_conversions)
 
 # pcl_conversions 必须走 ament_target_dependencies 才能带出头文件路径
 ament_target_dependencies(lidar_sim_node pcl_conversions)
