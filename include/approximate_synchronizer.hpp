@@ -116,11 +116,13 @@ private:
             // The oldest message cannot be matched by a future message if it is
             // already older than the newest message on the other side.
             if (stamp(images_.front()) < stamp(clouds_.front())) {
+                const auto droppedTimestamp = stamp(images_.front());
                 images_.pop_front();
-                reportDrop("camera", stamp(images_.front()), "outside synchronization tolerance");
+                reportDrop("camera", droppedTimestamp, "outside synchronization tolerance");
             } else {
+                const auto droppedTimestamp = stamp(clouds_.front());
                 clouds_.pop_front();
-                reportDrop("lidar", stamp(clouds_.front()), "outside synchronization tolerance");
+                reportDrop("lidar", droppedTimestamp, "outside synchronization tolerance");
             }
         }
     }
