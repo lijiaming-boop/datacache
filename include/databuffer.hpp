@@ -2,6 +2,7 @@
 
 #include "data.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <deque>
 #include <mutex>
@@ -18,18 +19,36 @@ public:
         if (maxSize_ == 0) {
             return;
         }
+        const auto timestamp = timestampOf(data);
         buffer_.push_back(std::move(data));
 
-        while (buffer_.size() > maxSize_) {
-            buffer_.pop_front();
+        while (countOfType(data.type) > maxSize_) {
+            const auto oldest = std::min_element(
+                buffer_.begin(), buffer_.end(),
+                [type = data.type](const SensorData& left, const SensorData& right) {
+                    if (left.type != type) return false;
+                    if (right.type != type) return true;
+                    return timestampOf(left) < timestampOf(right);
+                });
+            if (oldest != buffer_.end() && oldest->type == data.type) {
+                buffer_.erase(oldest);
+            } else {
+                break;
+            }
         }
 
-        if (maxAge_.nanoseconds() > 0 && !buffer_.empty()) {
-            const auto newest = timestampOf(buffer_.back());
-            const auto oldestAllowed = newest - maxAge_;
-            while (!buffer_.empty() && timestampOf(buffer_.front()) < oldestAllowed) {
-                buffer_.pop_front();
-            }
+        if (!hasLatestTimestamp_ || timestamp > latestTimestamp_) {
+            latestTimestamp_ = timestamp;
+            hasLatestTimestamp_ = true;
+        }
+        if (maxAge_.nanoseconds() > 0 && hasLatestTimestamp_) {
+            const auto oldestAllowed = latestTimestamp_ - maxAge_;
+            buffer_.erase(
+                std::remove_if(buffer_.begin(), buffer_.end(),
+                    [&](const SensorData& item) {
+                        return timestampOf(item) < oldestAllowed;
+                    }),
+                buffer_.end());
         }
     }
 
@@ -53,6 +72,12 @@ public:
     }
 
 private:
+    std::size_t countOfType(SensorType type) const {
+        return static_cast<std::size_t>(std::count_if(
+            buffer_.begin(), buffer_.end(),
+            [type](const SensorData& item) { return item.type == type; }));
+    }
+
     static rclcpp::Time timestampOf(const SensorData& data) {
         return std::visit([](const auto& value) { return value.timestamp; }, data.data);
     }
@@ -61,4 +86,6 @@ private:
     std::deque<SensorData> buffer_;
     std::size_t maxSize_;
     rclcpp::Duration maxAge_;
+    rclcpp::Time latestTimestamp_;
+    bool hasLatestTimestamp_{false};
 };
