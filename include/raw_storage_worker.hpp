@@ -288,9 +288,11 @@ private:
                     compressedData.data(), compressedData.size(), raw.buffer,
                     raw.buffer_length, job.compressionLevel);
                 if (!ZSTD_isError(compressedSize)) {
-                    storedFileName += ".zst";
-                    compressed = writeAtomically(job.directory / storedFileName,
-                                                 compressedData.data(), compressedSize);
+                    if (writeAtomically(job.directory / (rawFileName + ".zst"),
+                                        compressedData.data(), compressedSize)) {
+                        storedFileName += ".zst";
+                        compressed = true;
+                    }
                 } else {
                     RCLCPP_ERROR(logger_, "Zstandard compression failed for %s: %s",
                                  rawFileName.c_str(), ZSTD_getErrorName(compressedSize));
@@ -301,10 +303,6 @@ private:
                 if (!writeAtomically(job.directory / rawFileName, raw.buffer, raw.buffer_length)) {
                     RCLCPP_ERROR(logger_, "Unable to write raw record file: %s", rawFileName.c_str());
                     continue;
-                }
-                if (compressed && !job.keepRaw) {
-                    storedFileName = rawFileName;
-                    compressed = false;
                 }
             }
 
