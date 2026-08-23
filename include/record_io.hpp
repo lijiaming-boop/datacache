@@ -52,27 +52,63 @@ inline std::vector<std::string> splitCsvLine(const std::string& line) {
     return fields;
 }
 
-// 解析 manifest.csv；文件不存在或只有表头时返回空
+// 解析整数: 拒绝空串/残留垃圾/溢出, 代替会抛异常的 std::stoll
+inline bool parseI64(const std::string& text, std::int64_t& value) {
+    try {
+        std::size_t consumed = 0;
+        value = std::stoll(text, &consumed);
+        return consumed == text.size();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+inline bool parseU64(const std::string& text, std::uint64_t& value) {
+    try {
+        std::size_t consumed = 0;
+        value = std::stoull(text, &consumed);
+        return consumed == text.size();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// 解析 manifest.csv；文件不存在或只有表头时返回空。
+// problems 非空时, 崩溃等留下的撕裂/畸形行记入 problems 而不是抛异常。
 inline std::vector<ManifestEntry> readManifest(
-    const std::filesystem::path& eventDirectory) {
+    const std::filesystem::path& eventDirectory,
+    std::vector<std::string>* problems = nullptr) {
     std::vector<ManifestEntry> entries;
+    const auto note = [problems](const std::string& message) {
+        if (problems != nullptr) {
+            problems->push_back(message);
+        }
+    };
     std::ifstream input(eventDirectory / "manifest.csv");
     if (!input.is_open()) {
         return entries;
     }
     std::string line;
     std::getline(input, line);  // 表头
+    std::size_t lineNumber = 1;
     while (std::getline(input, line)) {
+        ++lineNumber;
         if (line.empty()) {
             continue;
         }
         const auto fields = splitCsvLine(line);
         if (fields.size() < 4) {
+            note("manifest.csv line " + std::to_string(lineNumber) +
+                 ": expected at least 4 fields, got " + std::to_string(fields.size()));
             continue;
         }
         ManifestEntry entry;
         entry.sensor = fields[0];
-        entry.timestampNs = std::stoll(fields[1]);
+        if (!parseI64(fields[1], entry.timestampNs)) {
+            note("manifest.csv line " + std::to_string(lineNumber) +
+                 ": invalid timestamp '" + fields[1] + "'");
+            continue;
+        }
         entry.file = fields[2];
         entry.encoding = fields[3];
         if (fields.size() >= 5) {
@@ -83,28 +119,47 @@ inline std::vector<ManifestEntry> readManifest(
     return entries;
 }
 
-inline std::vector<PairEntry> readPairs(const std::filesystem::path& eventDirectory) {
+inline std::vector<PairEntry> readPairs(
+    const std::filesystem::path& eventDirectory,
+    std::vector<std::string>* problems = nullptr) {
     std::vector<PairEntry> entries;
+    const auto note = [problems](const std::string& message) {
+        if (problems != nullptr) {
+            problems->push_back(message);
+        }
+    };
     std::ifstream input(eventDirectory / "pairs.csv");
     if (!input.is_open()) {
         return entries;
     }
     std::string line;
     std::getline(input, line);  // 表头
+    std::size_t lineNumber = 1;
     while (std::getline(input, line)) {
+        ++lineNumber;
         if (line.empty()) {
             continue;
         }
         const auto fields = splitCsvLine(line);
         if (fields.size() < 6) {
+            note("pairs.csv line " + std::to_string(lineNumber) +
+                 ": expected 6 fields, got " + std::to_string(fields.size()));
             continue;
         }
         PairEntry entry;
-        entry.pairId = static_cast<std::uint64_t>(std::stoull(fields[0]));
+        if (!parseU64(fields[0], entry.pairId)) {
+            note("pairs.csv line " + std::to_string(lineNumber) +
+                 ": invalid pair_id '" + fields[0] + "'");
+            continue;
+        }
         entry.status = fields[1];
-        entry.cameraTimestampNs = fields[2].empty() ? 0 : std::stoll(fields[2]);
-        entry.lidarTimestampNs = fields[3].empty() ? 0 : std::stoll(fields[3]);
-        entry.timeDiffNs = std::stoll(fields[4]);
+        if ((!fields[2].empty() && !parseI64(fields[2], entry.cameraTimestampNs)) ||
+            (!fields[3].empty() && !parseI64(fields[3], entry.lidarTimestampNs)) ||
+            !parseI64(fields[4], entry.timeDiffNs)) {
+            note("pairs.csv line " + std::to_string(lineNumber) +
+                 ": invalid numeric field");
+            continue;
+        }
         entry.reason = fields[5];
         entries.push_back(std::move(entry));
     }
@@ -227,7 +282,10 @@ struct VerificationReport {
 inline VerificationReport verifyEventDirectory(
     const std::filesystem::path& eventDirectory, const VerifyOptions& options = {}) {
     VerificationReport report;
-    const auto entries = readManifest(eventDirectory);
+    const std::size_t problemsBefore = report.problems.size();
+    const auto entries = readManifest(eventDirectory, &report.problems);
+    // 撕裂/畸形行本身就是完整性问题: 即使其余记录完好, 校验也不应通过
+    report.failedEntries += report.problems.size() - problemsBefore;
     if (entries.empty()) {
         report.problems.push_back("manifest.csv missing or has no entries");
         return report;

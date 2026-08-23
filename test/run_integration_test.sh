@@ -10,7 +10,7 @@
 #
 # 用法: bash test/run_integration_test.sh
 # 注意: ROS 的 setup.bash 内部使用了未定义变量, 必须在 set -u 之前 source
-REPO_DIR="$HOME/datacache"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="$REPO_DIR/test/logs"
 RECORDS_DIR="$REPO_DIR/records"
 

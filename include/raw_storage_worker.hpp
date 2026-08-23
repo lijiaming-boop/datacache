@@ -19,6 +19,11 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <pcl/io/pcd_io.h>
@@ -37,6 +42,7 @@ public:
                               std::shared_ptr<DiskSpaceManager> diskManager = nullptr)
         : logger_(std::move(logger)), maxPendingJobs_(maxPendingJobs),
           diskManager_(std::move(diskManager)),
+          compressionContext_(ZSTD_createCCtx()),
           worker_(&RawStorageWorker::run, this) {}
 
     RawStorageWorker(const RawStorageWorker&) = delete;
@@ -50,6 +56,9 @@ public:
         condition_.notify_one();
         if (worker_.joinable()) {
             worker_.join();
+        }
+        if (compressionContext_) {
+            ZSTD_freeCCtx(compressionContext_);
         }
     }
 
@@ -137,6 +146,29 @@ private:
         }
     }
 
+#ifndef _WIN32
+    // 断电安全: rename 只保证原子可见, 不保证数据块先于目录项落盘。
+    // 数据文件写完先 fsync 再 rename, rename 后同步父目录项, 掉电时才不会
+    // 出现"标记完整但内容为空"的文件。Windows 开发环境下退化为纯 rename。
+    static void syncFile(const std::filesystem::path& file) {
+        const int descriptor = ::open(file.string().c_str(), O_WRONLY);
+        if (descriptor < 0) {
+            return;
+        }
+        ::fsync(descriptor);
+        ::close(descriptor);
+    }
+
+    static void syncDirectory(const std::filesystem::path& directory) {
+        const int descriptor = ::open(directory.string().c_str(), O_RDONLY | O_DIRECTORY);
+        if (descriptor < 0) {
+            return;
+        }
+        ::fsync(descriptor);
+        ::close(descriptor);
+    }
+#endif
+
     static bool writeAtomically(const std::filesystem::path& target,
                                 const void* data, std::size_t size) {
         const auto temporary = target.string() + ".tmp";
@@ -150,12 +182,18 @@ private:
             return false;
         }
 
+#ifndef _WIN32
+        syncFile(temporary);
+#endif
         std::error_code error;
         std::filesystem::rename(temporary, target, error);
         if (error) {
             std::filesystem::remove(temporary);
             return false;
         }
+#ifndef _WIN32
+        syncDirectory(target.parent_path());
+#endif
         return true;
     }
 
@@ -231,6 +269,10 @@ private:
             std::filesystem::remove(temporary);
             return false;
         }
+#ifndef _WIN32
+        syncFile(target);
+        syncDirectory(directory);
+#endif
         return true;
     }
 
@@ -298,9 +340,14 @@ private:
             if (job.compressionEnabled) {
                 const auto bound = ZSTD_compressBound(raw.buffer_length);
                 std::vector<std::uint8_t> compressedData(bound);
-                const auto compressedSize = ZSTD_compress(
-                    compressedData.data(), compressedData.size(), raw.buffer,
-                    raw.buffer_length, job.compressionLevel);
+                // 复用压缩上下文 + 帧尾开启 XXH64 校验和, 静默位腐在解压时即可
+                // 被发现(默认 ZSTD_compress 不写校验和)
+                ZSTD_CCtx_setParameter(compressionContext_, ZSTD_c_compressionLevel,
+                                       job.compressionLevel);
+                ZSTD_CCtx_setParameter(compressionContext_, ZSTD_c_checksumFlag, 1);
+                const auto compressedSize = ZSTD_compress2(
+                    compressionContext_, compressedData.data(), compressedData.size(),
+                    raw.buffer, raw.buffer_length);
                 if (!ZSTD_isError(compressedSize)) {
                     if (writeAtomically(job.directory / (rawFileName + ".zst"),
                                         compressedData.data(), compressedSize)) {
@@ -345,7 +392,25 @@ private:
                      << convertedFileName << "\n";
         }
 
+        // .complete 必须在清单文件越过用户态缓冲之后写入: 否则进程在该窗口内
+        // 崩溃会留下"标记完整但 manifest 尾行缺失"的目录, 上传器会把它当完整
+        // 目录发走
+        manifest.flush();
+        if (!manifest) {
+            RCLCPP_ERROR(logger_, "Unable to flush raw record manifest in %s",
+                         job.directory.string().c_str());
+            return;
+        }
+        manifest.close();
+
         if (job.finalJob) {
+#ifndef _WIN32
+            // 追加写的清单同样要越过页缓存, .complete 的可见性才有意义
+            syncFile(job.directory / "manifest.csv");
+            if (!job.pairs.empty()) {
+                syncFile(job.directory / "pairs.csv");
+            }
+#endif
             writeCompletionMarker(job.directory, job.records.size());
         }
 
@@ -382,6 +447,9 @@ private:
     rclcpp::Logger logger_;
     std::size_t maxPendingJobs_;
     std::shared_ptr<DiskSpaceManager> diskManager_;
+    // 压缩只在 worker_ 线程的 writeJob 里使用, 无需加锁; 声明在 worker_ 之前
+    // 保证线程启动前已就绪
+    mutable ZSTD_CCtx* compressionContext_;
     std::size_t reservedJobs_{0};
     std::deque<Job> jobs_;
     std::mutex mutex_;

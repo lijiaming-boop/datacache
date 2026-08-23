@@ -107,7 +107,9 @@ colcon test && colcon test-result --verbose
 
 覆盖模块：ConfigManager（解析/默认值）、DataBuffer（数量与年龄驱逐/时间范围）、
 PairIndex（账本/裁剪）、ApproximateSynchronizer（配对/丢弃/冲刷）、
-record_io（写→读回环 + 损坏检测）、UploadWorker（候选扫描/HTTP 上传/标记/后台循环）。
+record_io（写→读回环 + 损坏/撕裂行检测）、UploadWorker（候选扫描/HTTP 上传/标记/
+后台循环/重试耗尽与退避）、EventMonitor（pre/post 窗口切分/调度到期/预留回滚/
+并发上限）、DiskSpaceManager（天数与容量清理/写前检查/节流）。
 
 ## 端到端冒烟验证
 
@@ -163,13 +165,20 @@ bash tools/smoke_test.sh
 
 - **异步落盘**：订阅回调只入队，序列化/zstd/JPEG/PCD 全部在单个后台线程执行；
   存储队列满时通过预约机制优先保证 post 窗口数据的槽位。
-- **原子写**：所有文件先写 `.tmp` 再 rename，进程崩溃不留半文件。
+- **原子 + 落盘写**：所有记录文件先写 `.tmp`、fsync 后再 rename（并同步父目录项），
+  进程崩溃不留半文件，掉电时 rename 也不会先于数据块可见；`.complete` 标记在
+  manifest/pairs 刷盘之后写入。zstd 帧携带 XXH64 内容校验和，静默位腐在解压时
+  即可被发现。
+- **O(1) 摊还热路径**：DataBuffer 按传感器类型分队列、队首弹出淘汰；
+  同步器前端贪心配对、锁外派发回调；PairIndex 用 deque 裁剪——每条消息的
+  处理成本不随缓存/账本规模增长。
 - **传感器时间域**：事件窗口边界用缓存内最新 `header.stamp` 计算，避免节点时钟
-  与传感器时钟偏移导致切片错位；post 窗口另有墙钟兜底防传感器停滞钉死任务。
+  与传感器时钟偏移导致切片错位；post 窗口另有墙钟兜底防传感器停滞钉死任务；
+  pre/post 批次在 eventTime 边界去重。
 - **磁盘安全**：写前剩余空间检查 + 天数/容量双保留策略，超限时从最旧事件目录
   开始回收。
 - **写读闭环**：`record_io.hpp` 同时供 CLI 与单测使用，落盘格式（CDR+zstd）有
-  回读实现与损坏检测保障。
+  回读实现与损坏检测保障；崩溃残留的撕裂 CSV 行按问题上报而非抛异常。
 
 ## 已知限制
 
@@ -178,3 +187,5 @@ bash tools/smoke_test.sh
   也不会被回传。
 - `pointcloud_format` 仅支持 pcd；视频片段为逐帧图像，无 h264/h265 编码。
 - 相机节点依赖 GUI 环境的 USB 设备；无相机时可只跑 lidar_sim 链路。
+- `.upload_failed` 为永久终态，当前无自动/命令行重试入口，需人工删除标记后
+  等待下个扫描周期。

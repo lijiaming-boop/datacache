@@ -43,7 +43,7 @@ public:
                   "max_pending_storage_jobs", 20))),
               diskManager_)),
           maxActiveCaptures_(static_cast<std::size_t>(std::max(1, configManager_->getIntConfig(
-              "max_active_event_captures", 16)))),
+                  "max_active_event_captures", 16)))),
           sensorStallGrace_(rclcpp::Duration::from_seconds(
               std::max(0, configManager_->getIntConfig("sensor_stall_grace_ms", 5000)) / 1000.0)),
           schedulerTimer_(node_->create_wall_timer(
@@ -156,6 +156,54 @@ public:
         return accepted;
     }
 
+    // 检查并收割到期的 post 窗口捕获任务。正常由 schedulerTimer_ 周期调用;
+    // 公开为 public 供单元测试直接驱动(不依赖定时器回调被 spin 到)。
+    void processExpiredCaptures() {
+        const auto wallNow = clock_->now();
+        const auto sensorNow = dataBuffer_->latestSensorTimestamp();
+        std::vector<EventCaptureTask> expired;
+        {
+            std::lock_guard<std::mutex> lock(captureMutex_);
+            for (auto it = activeCaptures_.begin(); it != activeCaptures_.end();) {
+                // Post data completes in sensor time; the wall deadline is the
+                // fallback so a stalled sensor cannot pin captures in memory.
+                const bool postWindowComplete =
+                    sensorNow.has_value() && *sensorNow >= it->second.endTime;
+                if (postWindowComplete || wallNow >= it->second.wallDeadline) {
+                    expired.push_back(std::move(it->second));
+                    it = activeCaptures_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        for (const auto& task : expired) {
+            if (flushPendingPairs_) flushPendingPairs_();
+            // pre 批次已含 [start, eventTime] 闭区间; post 批次排除 eventTime 边界,
+            // 否则边界帧会写两次(同名文件被覆盖, manifest 出现重复行)
+            auto records = dataBuffer_->getDataWithinTimeRange(task.eventTime, task.endTime);
+            records.erase(std::remove_if(records.begin(), records.end(),
+                          [eventTime = task.eventTime](const SensorData& record) {
+                              return timestampOf(record) == eventTime;
+                          }),
+                          records.end());
+            auto pairs = pairIndex_->getDataWithinTimeRange(task.eventTime, task.endTime);
+            pairs.erase(std::remove_if(pairs.begin(), pairs.end(),
+                        [eventTime = task.eventTime](const PairRecord& record) {
+                            const auto timestamp = record.hasCamera
+                                ? record.cameraTimestamp : record.lidarTimestamp;
+                            return timestamp == eventTime;
+                        }),
+                        pairs.end());
+            if (!enqueueRecords(task.directory, task.eventName, std::move(records),
+                                std::move(pairs), true, true)) {
+                RCLCPP_ERROR(logger_, "Post-event storage failed for '%s'",
+                             task.eventName.c_str());
+            }
+        }
+    }
+
 private:
     static DiskSpaceManager::Policy loadDiskPolicy(
         const std::shared_ptr<ConfigManager>& config) {
@@ -186,36 +234,8 @@ private:
         std::filesystem::path directory;
     };
 
-    void processExpiredCaptures() {
-        const auto wallNow = clock_->now();
-        const auto sensorNow = dataBuffer_->latestSensorTimestamp();
-        std::vector<EventCaptureTask> expired;
-        {
-            std::lock_guard<std::mutex> lock(captureMutex_);
-            for (auto it = activeCaptures_.begin(); it != activeCaptures_.end();) {
-                // Post data completes in sensor time; the wall deadline is the
-                // fallback so a stalled sensor cannot pin captures in memory.
-                const bool postWindowComplete =
-                    sensorNow.has_value() && *sensorNow >= it->second.endTime;
-                if (postWindowComplete || wallNow >= it->second.wallDeadline) {
-                    expired.push_back(std::move(it->second));
-                    it = activeCaptures_.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-
-        for (const auto& task : expired) {
-            if (flushPendingPairs_) flushPendingPairs_();
-            if (!enqueueRecords(task.directory, task.eventName,
-                                dataBuffer_->getDataWithinTimeRange(task.eventTime, task.endTime),
-                                pairIndex_->getDataWithinTimeRange(task.eventTime, task.endTime),
-                                true, true)) {
-                RCLCPP_ERROR(logger_, "Post-event storage failed for '%s'",
-                             task.eventName.c_str());
-            }
-        }
+    static rclcpp::Time timestampOf(const SensorData& data) {
+        return std::visit([](const auto& value) { return value.timestamp; }, data.data);
     }
 
     int getEventIntConfig(const std::string& eventName, const std::string& suffix,
