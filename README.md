@@ -105,6 +105,10 @@ ros2 run datacache datacache_node --ros-args -p config_path:=config.txt
 colcon test && colcon test-result --verbose
 ```
 
+GitHub Actions 会在每次 PR 与 main 推送时自动执行：编译 + 全部单测、clang-format
+格式检查、以及 ASan/UBSan 下的单测（见 `.github/workflows/ci.yml`）。本地以
+`colcon build --cmake-args -DDATACACHE_SANITIZERS=ON` 可复现 sanitizer 构建。
+
 覆盖模块：ConfigManager（解析/默认值）、DataBuffer（数量与年龄驱逐/时间范围）、
 PairIndex（账本/裁剪）、ApproximateSynchronizer（配对/丢弃/冲刷）、
 record_io（写→读回环 + 损坏/撕裂行检测）、UploadWorker（候选扫描/HTTP 上传/标记/
@@ -159,7 +163,8 @@ bash tools/smoke_test.sh
 | `enable_collision_event` 等 | true | 事件注册开关 |
 | `event_<name>_pre_time/post_time` | 5/5 | 每事件窗口秒数 |
 | `event_<name>_record_camera/lidar` | true | 每事件传感器选择 |
-| `record_directory` | records | 落盘根目录 |
+| `record_directory` | records | 落盘根目录（启动时解析为绝对路径并打日志） |
+| `config_strict` | false | 严格模式：配置出现未知键或类型不合法的值时拒绝启动 |
 
 ## 设计要点
 

@@ -26,49 +26,45 @@ void DataCacheNode::loadConfiguration() {
     }
 
     syncEnabled_ = configManager_->getBoolConfig("sync_enabled", true);
-    syncRequiredForRecording_ = configManager_->getBoolConfig(
-        "sync_required_for_recording", false);
+    syncRequiredForRecording_ = configManager_->getBoolConfig("sync_required_for_recording", false);
     if (syncRequiredForRecording_ && !syncEnabled_) {
-        RCLCPP_WARN(get_logger(),
-                    "sync_required_for_recording=true requires sync_enabled; "
-                    "disabling strict recording mode");
+        RCLCPP_WARN(get_logger(), "sync_required_for_recording=true requires sync_enabled; "
+                                  "disabling strict recording mode");
         syncRequiredForRecording_ = false;
     }
 }
 
 void DataCacheNode::createCoreComponents() {
     configuredBufferSize_ = configManager_->getIntConfig("buffer_size", 1000);
-    const auto bufferSize = configuredBufferSize_ > 0
-        ? static_cast<std::size_t>(configuredBufferSize_) : 0U;
-    const auto bufferSeconds = std::max(
-        0, configManager_->getIntConfig("buffer_duration_seconds", 30));
-    dataBuffer_ = std::make_shared<DataBuffer>(
-        bufferSize, rclcpp::Duration::from_seconds(bufferSeconds));
+    const auto bufferSize =
+        configuredBufferSize_ > 0 ? static_cast<std::size_t>(configuredBufferSize_) : 0U;
+    const auto bufferSeconds =
+        std::max(0, configManager_->getIntConfig("buffer_duration_seconds", 30));
+    dataBuffer_ =
+        std::make_shared<DataBuffer>(bufferSize, rclcpp::Duration::from_seconds(bufferSeconds));
     pairIndex_ = std::make_shared<PairIndex>();
 
     const auto syncQueueSize = configManager_->getIntConfig("sync_queue_size", 100);
-    const auto syncToleranceMs = std::max(
-        0, configManager_->getIntConfig("sync_tolerance_ms", 20));
+    const auto syncToleranceMs = std::max(0, configManager_->getIntConfig("sync_tolerance_ms", 20));
     synchronizer_ = std::make_shared<ApproximateSynchronizer>(
         static_cast<std::size_t>(std::max(1, syncQueueSize)),
-        rclcpp::Duration::from_nanoseconds(
-            static_cast<int64_t>(syncToleranceMs) * 1000000LL),
+        rclcpp::Duration::from_nanoseconds(static_cast<int64_t>(syncToleranceMs) * 1000000LL),
         [this](const auto& image, const auto& cloud, const auto& difference) {
             pairIndex_->addMatched(rclcpp::Time(image->header.stamp),
                                    rclcpp::Time(cloud->header.stamp), difference);
         },
-        [this](const std::string& sensor, const rclcpp::Time& timestamp,
-               std::uint64_t count, const std::string& reason) {
+        [this](const std::string& sensor, const rclcpp::Time& timestamp, std::uint64_t count,
+               const std::string& reason) {
             pairIndex_->addSingle(sensor, timestamp, reason);
-            RCLCPP_WARN(get_logger(),
-                        "Approximate synchronizer dropped %s data (%llu total): %s",
-                        sensor.c_str(), static_cast<unsigned long long>(count),
-                        reason.c_str());
+            RCLCPP_WARN(get_logger(), "Approximate synchronizer dropped %s data (%llu total): %s",
+                        sensor.c_str(), static_cast<unsigned long long>(count), reason.c_str());
         });
 
     eventMonitor_ = std::make_shared<EventMonitor>(
         dataBuffer_, configManager_, pairIndex_, get_logger(), get_clock(), this,
         [this]() { synchronizer_->flushUnmatched(); }, syncRequiredForRecording_);
+    RCLCPP_INFO(get_logger(), "Recording root resolved to: %s",
+                EventMonitor::loadRecordRoot(configManager_).string().c_str());
 }
 
 void DataCacheNode::createWatchdog() {
@@ -89,18 +85,18 @@ void DataCacheNode::createWatchdog() {
         });
     const auto registerWatchdogSensor = [this](const char* sensor) {
         const auto fallback = configManager_->getIntConfig("watchdog_stale_timeout_ms", 1000);
-        const auto timeoutMs = std::max(
-            1, configManager_->getIntConfig(
-                "watchdog_" + std::string(sensor) + "_stale_timeout_ms", fallback));
+        const auto timeoutMs =
+            std::max(1, configManager_->getIntConfig(
+                            "watchdog_" + std::string(sensor) + "_stale_timeout_ms", fallback));
         watchdog_->registerSensor(sensor, std::chrono::milliseconds(timeoutMs));
     };
     registerWatchdogSensor("camera");
     registerWatchdogSensor("lidar");
 
-    const auto checkPeriodMs = std::max(
-        1, configManager_->getIntConfig("watchdog_check_period_ms", 500));
-    watchdogTimer_ = create_wall_timer(
-        std::chrono::milliseconds(checkPeriodMs), [this]() { watchdog_->poll(); });
+    const auto checkPeriodMs =
+        std::max(1, configManager_->getIntConfig("watchdog_check_period_ms", 500));
+    watchdogTimer_ = create_wall_timer(std::chrono::milliseconds(checkPeriodMs),
+                                       [this]() { watchdog_->poll(); });
 }
 
 void DataCacheNode::createUploader() {
@@ -112,22 +108,19 @@ void DataCacheNode::createUploader() {
     UploadWorker::Config config;
     config.url = configManager_->getConfig("upload_url");
     if (config.url.empty()) {
-        RCLCPP_WARN(get_logger(),
-                    "upload_enabled=true but upload_url is empty; uploader disabled");
+        RCLCPP_WARN(get_logger(), "upload_enabled=true but upload_url is empty; uploader disabled");
         return;
     }
-    config.timeoutSeconds = std::max(
-        1L, static_cast<long>(configManager_->getIntConfig("upload_timeout_s", 30)));
-    config.maxRetries = std::max(
-        0, configManager_->getIntConfig("upload_max_retries", 5));
-    config.scanPeriod = std::chrono::milliseconds(std::max(
-        100, configManager_->getIntConfig("upload_scan_period_ms", 2000)));
-    config.retryBackoff = std::chrono::milliseconds(std::max(
-        1000, configManager_->getIntConfig("upload_retry_backoff_ms", 15000)));
+    config.timeoutSeconds =
+        std::max(1L, static_cast<long>(configManager_->getIntConfig("upload_timeout_s", 30)));
+    config.maxRetries = std::max(0, configManager_->getIntConfig("upload_max_retries", 5));
+    config.scanPeriod = std::chrono::milliseconds(
+        std::max(100, configManager_->getIntConfig("upload_scan_period_ms", 2000)));
+    config.retryBackoff = std::chrono::milliseconds(
+        std::max(1000, configManager_->getIntConfig("upload_retry_backoff_ms", 15000)));
 
-    auto recordDirectory = configManager_->getConfig("record_directory");
-    const std::filesystem::path recordRoot(
-        recordDirectory.empty() ? "records" : recordDirectory);
+    // 与 EventMonitor::loadRecordRoot 相同的解析规则, 保证存储与上传盯住同一目录
+    const auto recordRoot = EventMonitor::loadRecordRoot(configManager_);
 
     uploadWorker_ = std::make_unique<UploadWorker>(recordRoot, config, get_logger());
     uploadWorker_->start();
@@ -140,8 +133,8 @@ void DataCacheNode::registerEvents() {
             RCLCPP_INFO(get_logger(), "Event '%s' triggered!", eventName.c_str());
             const auto accepted = eventMonitor_->recordDataAroundEvent(eventName);
             if (!accepted) {
-                RCLCPP_ERROR(get_logger(),
-                             "Event '%s' was not accepted for storage", eventName.c_str());
+                RCLCPP_ERROR(get_logger(), "Event '%s' was not accepted for storage",
+                             eventName.c_str());
             }
             return accepted;
         });
@@ -159,12 +152,9 @@ void DataCacheNode::createSubscriptions() {
     const auto sensorQos = rclcpp::SensorDataQoS();
     imageSub_ = create_subscription<sensor_msgs::msg::Image>(
         "/image_raw", sensorQos,
-        [this](const sensor_msgs::msg::Image::SharedPtr message) {
-            handleImage(message);
-        });
+        [this](const sensor_msgs::msg::Image::SharedPtr message) { handleImage(message); });
     cloudSub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        "/point_cloud", sensorQos,
-        [this](const sensor_msgs::msg::PointCloud2::SharedPtr message) {
+        "/point_cloud", sensorQos, [this](const sensor_msgs::msg::PointCloud2::SharedPtr message) {
             handlePointCloud(message);
         });
 }
@@ -182,20 +172,17 @@ void DataCacheNode::handleImage(sensor_msgs::msg::Image::SharedPtr message) {
     if (watchdog_) {
         watchdog_->noteData("camera");
     }
-    dataBuffer_->addData({SensorType::CAMERA,
-                          CameraData{message->header.stamp, message}});
+    dataBuffer_->addData({SensorType::CAMERA, CameraData{message->header.stamp, message}});
     if (syncEnabled_) {
         synchronizer_->addImage(message);
     }
 }
 
-void DataCacheNode::handlePointCloud(
-    sensor_msgs::msg::PointCloud2::SharedPtr message) {
+void DataCacheNode::handlePointCloud(sensor_msgs::msg::PointCloud2::SharedPtr message) {
     if (watchdog_) {
         watchdog_->noteData("lidar");
     }
-    dataBuffer_->addData({SensorType::LIDAR,
-                          LidarData{message->header.stamp, message}});
+    dataBuffer_->addData({SensorType::LIDAR, LidarData{message->header.stamp, message}});
     if (syncEnabled_) {
         synchronizer_->addPointCloud(message);
     }
@@ -215,10 +202,11 @@ void DataCacheNode::handleTrigger(
     response->success = triggered;
     // Sensor status travels with the response so the trigger caller immediately
     // knows how complete the recorded data is.
-    const auto sensorStatus = watchdog_
-        ? " [" + watchdog_->describeStatus() + "]" : "";
+    const auto sensorStatus = watchdog_ ? " [" + watchdog_->describeStatus() + "]" : "";
     response->message = triggered
-        ? "Event '" + eventName + "' accepted for storage" + sensorStatus
-        : "Event '" + eventName + "' was not accepted "
-          "(unregistered, storage unavailable, or no synchronized pairs)" + sensorStatus;
+                            ? "Event '" + eventName + "' accepted for storage" + sensorStatus
+                            : "Event '" + eventName +
+                                  "' was not accepted "
+                                  "(unregistered, storage unavailable, or no synchronized pairs)" +
+                                  sensorStatus;
 }

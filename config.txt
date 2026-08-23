@@ -78,3 +78,8 @@ event_post_time=5
 record_camera=true
 record_lidar=true
 record_directory=records
+
+# Refuse to start when the config contains unknown keys or values that do not
+# match the key's declared type (typos are otherwise reported as warnings and
+# silently fall back to code defaults)
+config_strict=false

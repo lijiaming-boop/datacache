@@ -12,6 +12,16 @@ project(datacache LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ASan/UBSan 构建（CI sanitizer 任务与本地内存问题排查）:
+#   colcon build --cmake-args -DDATACACHE_SANITIZERS=ON
+# UBSan 配 -fno-sanitize-recover 让未定义行为直接中止测试而不是仅打印
+option(DATACACHE_SANITIZERS "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(DATACACHE_SANITIZERS)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer
+                      -fno-sanitize-recover=all -g)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
