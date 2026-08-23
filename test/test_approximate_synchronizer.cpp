@@ -34,19 +34,15 @@ rclcpp::Time timeAt(std::int64_t nanoseconds) {
 
 Image::SharedPtr imageAt(std::int64_t nanoseconds) {
     auto image = std::make_shared<Image>();
-    image->header.stamp.sec =
-        static_cast<std::int32_t>(nanoseconds / 1000000000LL);
-    image->header.stamp.nanosec =
-        static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    image->header.stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
+    image->header.stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
     return image;
 }
 
 PointCloud::SharedPtr cloudAt(std::int64_t nanoseconds) {
     auto cloud = std::make_shared<PointCloud>();
-    cloud->header.stamp.sec =
-        static_cast<std::int32_t>(nanoseconds / 1000000000LL);
-    cloud->header.stamp.nanosec =
-        static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    cloud->header.stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
+    cloud->header.stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
     return cloud;
 }
 
@@ -57,15 +53,13 @@ public:
               queueSize, rclcpp::Duration::from_nanoseconds(toleranceMs * 1'000'000),
               [this](const Image::SharedPtr& image, const PointCloud::SharedPtr& cloud,
                      rclcpp::Duration difference) {
-                  matches_.push_back(MatchLog{
-                      rclcpp::Time(image->header.stamp).nanoseconds(),
-                      rclcpp::Time(cloud->header.stamp).nanoseconds(),
-                      difference.nanoseconds()});
+                  matches_.push_back(MatchLog{rclcpp::Time(image->header.stamp).nanoseconds(),
+                                              rclcpp::Time(cloud->header.stamp).nanoseconds(),
+                                              difference.nanoseconds()});
               },
-              [this](const std::string& sensor, const rclcpp::Time& timestamp,
-                     std::uint64_t count, const std::string& reason) {
-                  drops_.push_back(DropLog{
-                      sensor, timestamp.nanoseconds(), count, reason});
+              [this](const std::string& sensor, const rclcpp::Time& timestamp, std::uint64_t count,
+                     const std::string& reason) {
+                  drops_.push_back(DropLog{sensor, timestamp.nanoseconds(), count, reason});
               }) {}
 
     ApproximateSynchronizer synchronizer_;
@@ -127,7 +121,7 @@ TEST(ApproximateSynchronizerTest, QueueFullDropsOldest) {
     EXPECT_EQ(harness.drops_[1].sensor, "camera");
     EXPECT_EQ(harness.drops_[1].timestampNs, 200'000'000);
     EXPECT_EQ(harness.drops_[1].reason, "outside synchronization tolerance");
-    EXPECT_EQ(harness.drops_[1].count, 2U);  // 每传感器累计计数
+    EXPECT_EQ(harness.drops_[1].count, 2U); // 每传感器累计计数
 }
 
 TEST(ApproximateSynchronizerTest, FlushUnmatchedReportsBothSides) {
@@ -161,4 +155,4 @@ TEST(ApproximateSynchronizerTest, SingleSideAloneNeverMatchesOrDrops) {
     EXPECT_TRUE(harness.drops_.empty());
 }
 
-}  // namespace
+} // namespace

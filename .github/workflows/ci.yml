@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # 格式检查: .clang-format 已按既有代码风格校准(本地全库零差异)
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+      - name: Check formatting
+        run: |
+          find include src test \
+              \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cc' \) \
+              -print0 | xargs -0 clang-format --dry-run --Werror
+
+  # 编译 + 全部单元测试 (与 README 构建说明同一依赖集, 省去 desktop 元包)
+  build-and-test:
+    name: build & test (Jazzy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              ros-jazzy-cv-bridge \
+              ros-jazzy-pcl-conversions \
+              ros-jazzy-rosidl-default-generators \
+              ros-jazzy-ament-cmake-gtest \
+              libpcl-dev libzstd-dev libcurl4-openssl-dev \
+              python3-colcon-common-extensions
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --event-handlers console_direct+
+      - name: Unit tests
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon test --event-handlers console_direct+
+          colcon test-result --verbose
+
+  # 同一套测试在 ASan + UBSan 下再跑一遍, 覆盖并发模块的内存/未定义行为
+  sanitizers:
+    name: unit tests (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              ros-jazzy-cv-bridge \
+              ros-jazzy-pcl-conversions \
+              ros-jazzy-rosidl-default-generators \
+              ros-jazzy-ament-cmake-gtest \
+              libpcl-dev libzstd-dev libcurl4-openssl-dev \
+              python3-colcon-common-extensions
+      - name: Build with sanitizers
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --cmake-args -DDATACACHE_SANITIZERS=ON \
+              --event-handlers console_direct+
+      - name: Unit tests under sanitizers
+        shell: bash
+        env:
+          # rclcpp 自身存在已知分配不走泄漏检测的惯例; 关闭 leak 检测保留内存错误检测
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon test --event-handlers console_direct+
+          colcon test-result --verbose

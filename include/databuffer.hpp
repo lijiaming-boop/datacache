@@ -41,9 +41,8 @@ public:
         evictExpiredLocked();
     }
 
-    std::vector<SensorData> getDataWithinTimeRange(
-        const rclcpp::Time& start,
-        const rclcpp::Time& end) const {
+    std::vector<SensorData> getDataWithinTimeRange(const rclcpp::Time& start,
+                                                   const rclcpp::Time& end) const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<SensorData> result;
         for (const auto& entry : queues_) {

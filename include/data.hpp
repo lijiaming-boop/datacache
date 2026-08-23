@@ -15,10 +15,7 @@ struct LidarData {
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
 };
 
-enum class SensorType {
-    CAMERA,
-    LIDAR
-};
+enum class SensorType { CAMERA, LIDAR };
 
 using SensorDataVariant = std::variant<CameraData, LidarData>;
 

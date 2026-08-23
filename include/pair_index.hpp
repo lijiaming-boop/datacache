@@ -25,8 +25,8 @@ public:
     void addMatched(const rclcpp::Time& camera, const rclcpp::Time& lidar,
                     const rclcpp::Duration& difference) {
         std::lock_guard<std::mutex> lock(mutex_);
-        records_.push_back(PairRecord{nextId_++, true, true, camera, lidar,
-                                      difference, "matched", ""});
+        records_.push_back(
+            PairRecord{nextId_++, true, true, camera, lidar, difference, "matched", ""});
         trim();
     }
 
@@ -36,18 +36,18 @@ public:
         const bool camera = sensor == "camera";
         records_.push_back(PairRecord{nextId_++, camera, !camera,
                                       camera ? timestamp : rclcpp::Time(),
-                                      camera ? rclcpp::Time() : timestamp,
-                                      rclcpp::Duration(0, 0),
+                                      camera ? rclcpp::Time() : timestamp, rclcpp::Duration(0, 0),
                                       camera ? "camera_only" : "lidar_only", reason});
         trim();
     }
 
     std::vector<PairRecord> getDataWithinTimeRange(const rclcpp::Time& start,
-                                                    const rclcpp::Time& end) const {
+                                                   const rclcpp::Time& end) const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<PairRecord> result;
         for (const auto& record : records_) {
-            const auto timestamp = record.hasCamera ? record.cameraTimestamp : record.lidarTimestamp;
+            const auto timestamp =
+                record.hasCamera ? record.cameraTimestamp : record.lidarTimestamp;
             if (timestamp >= start && timestamp <= end) {
                 result.push_back(record);
             }

@@ -18,16 +18,14 @@ rclcpp::Time timeAt(std::int64_t nanoseconds) {
 SensorData cameraAt(std::int64_t nanoseconds) {
     auto image = std::make_shared<sensor_msgs::msg::Image>();
     image->header.stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
-    image->header.stamp.nanosec =
-        static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    image->header.stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
     return SensorData{SensorType::CAMERA, CameraData{timeAt(nanoseconds), image}};
 }
 
 SensorData lidarAt(std::int64_t nanoseconds) {
     auto cloud = std::make_shared<sensor_msgs::msg::PointCloud2>();
     cloud->header.stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
-    cloud->header.stamp.nanosec =
-        static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    cloud->header.stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
     return SensorData{SensorType::LIDAR, LidarData{timeAt(nanoseconds), cloud}};
 }
 
@@ -60,8 +58,7 @@ TEST(DataBufferTest, AgeEvictionUsesGlobalNewestWatermark) {
 
     // 雷达时间戳跳到 100 s, 相机数据全部早于水位(100-10 s)被老化
     buffer.addData(lidarAt(100'000'000'000));
-    const auto remaining =
-        buffer.getDataWithinTimeRange(timeAt(0), timeAt(200'000'000'000));
+    const auto remaining = buffer.getDataWithinTimeRange(timeAt(0), timeAt(200'000'000'000));
     ASSERT_EQ(remaining.size(), 1U);
     EXPECT_EQ(remaining[0].type, SensorType::LIDAR);
 }
@@ -93,4 +90,4 @@ TEST(DataBufferTest, LatestSensorTimestampTracksNewest) {
     EXPECT_EQ(*buffer.latestSensorTimestamp(), timeAt(2000));
 }
 
-}  // namespace
+} // namespace

@@ -41,8 +41,7 @@ public:
     explicit RawStorageWorker(rclcpp::Logger logger, std::size_t maxPendingJobs = 20,
                               std::shared_ptr<DiskSpaceManager> diskManager = nullptr)
         : logger_(std::move(logger)), maxPendingJobs_(maxPendingJobs),
-          diskManager_(std::move(diskManager)),
-          compressionContext_(ZSTD_createCCtx()),
+          diskManager_(std::move(diskManager)), compressionContext_(ZSTD_createCCtx()),
           worker_(&RawStorageWorker::run, this) {}
 
     RawStorageWorker(const RawStorageWorker&) = delete;
@@ -64,20 +63,11 @@ public:
 
     // finalJob: 该事件目录的最后一批写入(post 窗口数据, 或无 post 窗口时的唯一
     // 一批)。完成后写入 .complete 标记, 上传模块以此识别可回传的事件目录。
-    bool enqueue(const std::filesystem::path& directory,
-                 std::vector<SensorData> records,
-                 bool recordCamera,
-                 bool recordLidar,
-                 bool compressionEnabled,
-                 int compressionLevel,
-                 bool keepRaw,
-                 bool conversionEnabled,
-                 std::string imageFormat,
-                 int imageQuality,
-                 std::string pointCloudFormat,
-                 std::vector<PairRecord> pairs = {},
-                 bool reserved = false,
-                 bool finalJob = false) {
+    bool enqueue(const std::filesystem::path& directory, std::vector<SensorData> records,
+                 bool recordCamera, bool recordLidar, bool compressionEnabled, int compressionLevel,
+                 bool keepRaw, bool conversionEnabled, std::string imageFormat, int imageQuality,
+                 std::string pointCloudFormat, std::vector<PairRecord> pairs = {},
+                 bool reserved = false, bool finalJob = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || (!reserved && jobs_.size() + reservedJobs_ >= maxPendingJobs_)) {
             if (reserved && reservedJobs_ > 0) {
@@ -89,9 +79,9 @@ public:
         }
 
         jobs_.push_back(Job{directory, std::move(records), recordCamera, recordLidar,
-                            compressionEnabled, compressionLevel, keepRaw,
-                            conversionEnabled, std::move(imageFormat), imageQuality,
-                            std::move(pointCloudFormat), std::move(pairs), finalJob});
+                            compressionEnabled, compressionLevel, keepRaw, conversionEnabled,
+                            std::move(imageFormat), imageQuality, std::move(pointCloudFormat),
+                            std::move(pairs), finalJob});
         if (reserved && reservedJobs_ > 0) {
             --reservedJobs_;
         }
@@ -169,8 +159,8 @@ private:
     }
 #endif
 
-    static bool writeAtomically(const std::filesystem::path& target,
-                                const void* data, std::size_t size) {
+    static bool writeAtomically(const std::filesystem::path& target, const void* data,
+                                std::size_t size) {
         const auto temporary = target.string() + ".tmp";
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) {
@@ -204,8 +194,8 @@ private:
     bool convertImage(const CameraData& camera, const std::filesystem::path& directory,
                       const std::string& fileName, const Job& job) const {
         const auto& message = *camera.image;
-        if (message.height == 0 || message.width == 0 ||
-            message.step == 0 || message.step * message.height > message.data.size()) {
+        if (message.height == 0 || message.width == 0 || message.step == 0 ||
+            message.step * message.height > message.data.size()) {
             RCLCPP_WARN(logger_, "Invalid image buffer; skipping format conversion");
             return false;
         }
@@ -216,18 +206,21 @@ private:
                             CV_8UC3, const_cast<unsigned char*>(message.data.data()), message.step);
         } else if (encoding == "rgb8") {
             const cv::Mat rgb(static_cast<int>(message.height), static_cast<int>(message.width),
-                              CV_8UC3, const_cast<unsigned char*>(message.data.data()), message.step);
+                              CV_8UC3, const_cast<unsigned char*>(message.data.data()),
+                              message.step);
             cv::cvtColor(rgb, image, cv::COLOR_RGB2BGR);
         } else if (encoding == "mono8") {
             image = cv::Mat(static_cast<int>(message.height), static_cast<int>(message.width),
                             CV_8UC1, const_cast<unsigned char*>(message.data.data()), message.step);
         } else if (encoding == "bgra8") {
             const cv::Mat bgra(static_cast<int>(message.height), static_cast<int>(message.width),
-                               CV_8UC4, const_cast<unsigned char*>(message.data.data()), message.step);
+                               CV_8UC4, const_cast<unsigned char*>(message.data.data()),
+                               message.step);
             cv::cvtColor(bgra, image, cv::COLOR_BGRA2BGR);
         } else if (encoding == "rgba8") {
             const cv::Mat rgba(static_cast<int>(message.height), static_cast<int>(message.width),
-                               CV_8UC4, const_cast<unsigned char*>(message.data.data()), message.step);
+                               CV_8UC4, const_cast<unsigned char*>(message.data.data()),
+                               message.step);
             cv::cvtColor(rgba, image, cv::COLOR_RGBA2BGR);
         } else {
             RCLCPP_WARN(logger_, "Unsupported image encoding for conversion: %s", encoding.c_str());
@@ -249,7 +242,8 @@ private:
     bool convertPointCloud(const LidarData& lidar, const std::filesystem::path& directory,
                            const std::string& fileName, const Job& job) const {
         if (job.pointCloudFormat != "pcd") {
-            RCLCPP_WARN(logger_, "Unsupported point cloud format: %s", job.pointCloudFormat.c_str());
+            RCLCPP_WARN(logger_, "Unsupported point cloud format: %s",
+                        job.pointCloudFormat.c_str());
             return false;
         }
 
@@ -320,8 +314,8 @@ private:
         writePairs(job.directory, job.pairs);
 
         for (const auto& record : job.records) {
-            const bool enabled = record.type == SensorType::CAMERA
-                ? job.recordCamera : job.recordLidar;
+            const bool enabled =
+                record.type == SensorType::CAMERA ? job.recordCamera : job.recordLidar;
             if (!enabled) {
                 continue;
             }
@@ -331,8 +325,8 @@ private:
             rclcpp::SerializedMessage serialized;
             serialize(record, serialized);
             const auto& raw = serialized.get_rcl_serialized_message();
-            const auto rawFileName = std::string(prefix) + "_" +
-                std::to_string(timestamp.nanoseconds()) + ".bin";
+            const auto rawFileName =
+                std::string(prefix) + "_" + std::to_string(timestamp.nanoseconds()) + ".bin";
             auto storedFileName = rawFileName;
             bool compressed = false;
             std::string convertedFileName;
@@ -345,9 +339,9 @@ private:
                 ZSTD_CCtx_setParameter(compressionContext_, ZSTD_c_compressionLevel,
                                        job.compressionLevel);
                 ZSTD_CCtx_setParameter(compressionContext_, ZSTD_c_checksumFlag, 1);
-                const auto compressedSize = ZSTD_compress2(
-                    compressionContext_, compressedData.data(), compressedData.size(),
-                    raw.buffer, raw.buffer_length);
+                const auto compressedSize =
+                    ZSTD_compress2(compressionContext_, compressedData.data(),
+                                   compressedData.size(), raw.buffer, raw.buffer_length);
                 if (!ZSTD_isError(compressedSize)) {
                     if (writeAtomically(job.directory / (rawFileName + ".zst"),
                                         compressedData.data(), compressedSize)) {
@@ -362,34 +356,37 @@ private:
 
             if (!compressed || job.keepRaw) {
                 if (!writeAtomically(job.directory / rawFileName, raw.buffer, raw.buffer_length)) {
-                    RCLCPP_ERROR(logger_, "Unable to write raw record file: %s", rawFileName.c_str());
+                    RCLCPP_ERROR(logger_, "Unable to write raw record file: %s",
+                                 rawFileName.c_str());
                     continue;
                 }
             }
 
             if (job.conversionEnabled) {
-                const auto convertedDirectory = job.directory /
-                    (record.type == SensorType::CAMERA ? "images" : "pointclouds");
+                const auto convertedDirectory =
+                    job.directory / (record.type == SensorType::CAMERA ? "images" : "pointclouds");
                 std::error_code error;
                 std::filesystem::create_directories(convertedDirectory, error);
                 if (!error) {
-                    const auto baseName = std::string(prefix) + "_" +
-                        std::to_string(timestamp.nanoseconds());
-                    const bool converted = record.type == SensorType::CAMERA
-                        ? convertImage(std::get<CameraData>(record.data), convertedDirectory,
-                                       baseName, job)
-                        : convertPointCloud(std::get<LidarData>(record.data), convertedDirectory,
-                                            baseName, job);
+                    const auto baseName =
+                        std::string(prefix) + "_" + std::to_string(timestamp.nanoseconds());
+                    const bool converted =
+                        record.type == SensorType::CAMERA
+                            ? convertImage(std::get<CameraData>(record.data), convertedDirectory,
+                                           baseName, job)
+                            : convertPointCloud(std::get<LidarData>(record.data),
+                                                convertedDirectory, baseName, job);
                     if (converted) {
                         convertedFileName = (convertedDirectory.filename() /
-                            (baseName + (record.type == SensorType::CAMERA
-                                ? imageExtension(job.imageFormat) : ".pcd"))).string();
+                                             (baseName + (record.type == SensorType::CAMERA
+                                                              ? imageExtension(job.imageFormat)
+                                                              : ".pcd")))
+                                                .string();
                     }
                 }
             }
-            manifest << prefix << "," << timestamp.nanoseconds() << ","
-                     << storedFileName << "," << (compressed ? "zstd" : "raw") << ","
-                     << convertedFileName << "\n";
+            manifest << prefix << "," << timestamp.nanoseconds() << "," << storedFileName << ","
+                     << (compressed ? "zstd" : "raw") << "," << convertedFileName << "\n";
         }
 
         // .complete 必须在清单文件越过用户态缓冲之后写入: 否则进程在该窗口内
@@ -430,17 +427,20 @@ private:
 
     static void writePairs(const std::filesystem::path& directory,
                            const std::vector<PairRecord>& pairs) {
-        if (pairs.empty()) return;
+        if (pairs.empty())
+            return;
         std::ofstream output(directory / "pairs.csv", std::ios::app);
-        if (!output) return;
+        if (!output)
+            return;
         if (output.tellp() == 0) {
             output << "pair_id,status,camera_timestamp,lidar_timestamp,time_diff_ns,reason\n";
         }
         for (const auto& pair : pairs) {
             output << pair.pairId << ',' << pair.status << ','
-                   << (pair.hasCamera ? std::to_string(pair.cameraTimestamp.nanoseconds()) : "") << ','
-                   << (pair.hasLidar ? std::to_string(pair.lidarTimestamp.nanoseconds()) : "") << ','
-                   << pair.difference.nanoseconds() << ',' << pair.reason << '\n';
+                   << (pair.hasCamera ? std::to_string(pair.cameraTimestamp.nanoseconds()) : "")
+                   << ','
+                   << (pair.hasLidar ? std::to_string(pair.lidarTimestamp.nanoseconds()) : "")
+                   << ',' << pair.difference.nanoseconds() << ',' << pair.reason << '\n';
         }
     }
 

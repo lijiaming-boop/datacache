@@ -32,15 +32,12 @@ public:
 
 [[maybe_unused]] const auto* g_rosContext = ::testing::AddGlobalTestEnvironment(new RosContext);
 
-rclcpp::Time timeAt(std::int64_t nanoseconds) {
-    return rclcpp::Time(nanoseconds, RCL_ROS_TIME);
-}
+rclcpp::Time timeAt(std::int64_t nanoseconds) { return rclcpp::Time(nanoseconds, RCL_ROS_TIME); }
 
 SensorData cameraAt(std::int64_t nanoseconds) {
     auto image = std::make_shared<sensor_msgs::msg::Image>();
     image->header.stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
-    image->header.stamp.nanosec =
-        static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    image->header.stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
     // 字段必须自洽(width/height/step/encoding), 否则 verifyEventDirectory 判失败
     image->height = 2;
     image->width = 3;
@@ -54,16 +51,15 @@ SensorData cameraAt(std::int64_t nanoseconds) {
 std::filesystem::path makeTempDir(const std::string& tag) {
     static std::uint64_t counter = 0;
     const auto dir = std::filesystem::temp_directory_path() /
-        ("datacache_event_monitor_" + tag + "_" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-         "_" + std::to_string(++counter));
+                     ("datacache_event_monitor_" + tag + "_" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                      "_" + std::to_string(++counter));
     std::filesystem::create_directories(dir);
     return dir;
 }
 
 bool waitFor(const std::function<bool()>& predicate, int timeoutMs) {
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < deadline) {
         if (predicate()) {
             return true;
@@ -76,8 +72,8 @@ bool waitFor(const std::function<bool()>& predicate, int timeoutMs) {
 std::vector<std::filesystem::path> listEventDirs(const std::filesystem::path& root) {
     std::vector<std::filesystem::path> dirs;
     std::error_code error;
-    for (std::filesystem::directory_iterator it(root, error), end;
-         !error && it != end; it.increment(error)) {
+    for (std::filesystem::directory_iterator it(root, error), end; !error && it != end;
+         it.increment(error)) {
         std::error_code entryError;
         if (it->is_directory(entryError) && !entryError) {
             dirs.push_back(it->path());
@@ -104,10 +100,9 @@ struct MonitorFixture {
     std::shared_ptr<PairIndex> pairs;
     std::unique_ptr<EventMonitor> monitor;
 
-    MonitorFixture(int preSeconds, int postSeconds, int pendingJobs, int maxActive,
-                   int graceMs, bool requireSynced = false)
-        : root(makeTempDir("fixture")),
-          recordsRoot(root / "records"),
+    MonitorFixture(int preSeconds, int postSeconds, int pendingJobs, int maxActive, int graceMs,
+                   bool requireSynced = false)
+        : root(makeTempDir("fixture")), recordsRoot(root / "records"),
           node(rclcpp::Node::make_shared("event_monitor_test")),
           buffer(std::make_shared<DataBuffer>(1000)),
           config(std::make_shared<ConfigManager>(rclcpp::get_logger("test"))),
@@ -133,9 +128,9 @@ struct MonitorFixture {
         if (!config->loadConfig(configFile.string())) {
             ADD_FAILURE() << "cannot load test config";
         }
-        monitor = std::make_unique<EventMonitor>(
-            buffer, config, pairs, rclcpp::get_logger("test"),
-            node->get_clock(), node.get(), nullptr, requireSynced);
+        monitor =
+            std::make_unique<EventMonitor>(buffer, config, pairs, rclcpp::get_logger("test"),
+                                           node->get_clock(), node.get(), nullptr, requireSynced);
         monitor->registerEvent("collision",
                                [this] { return monitor->recordDataAroundEvent("collision"); });
     }
@@ -177,8 +172,8 @@ TEST(EventMonitorTest, SensorDeadlineCompletesPostWindowWithoutBoundaryDuplicate
         stamps.push_back(entry.timestampNs);
     }
     std::sort(stamps.begin(), stamps.end());
-    const std::vector<std::int64_t> expected{
-        0, 500'000'000LL, 1'000'000'000LL, 1'500'000'000LL, 2'000'000'000LL};
+    const std::vector<std::int64_t> expected{0, 500'000'000LL, 1'000'000'000LL, 1'500'000'000LL,
+                                             2'000'000'000LL};
     EXPECT_EQ(stamps, expected);
     // eventTime 边界帧(1s)属于 pre 闭区间, post 批次不应重复写入
     EXPECT_EQ(std::count(stamps.begin(), stamps.end(), 1'000'000'000LL), 1);
@@ -207,7 +202,7 @@ TEST(EventMonitorTest, RejectsEventWithoutSyncedPairWhenRequired) {
     MonitorFixture fixture(/*pre=*/1, /*post=*/1, /*pending=*/4, /*active=*/2,
                            /*grace=*/0, /*requireSynced=*/true);
 
-    fixture.buffer->addData(cameraAt(1'000'000'000));  // 无任何配对账本记录
+    fixture.buffer->addData(cameraAt(1'000'000'000)); // 无任何配对账本记录
     EXPECT_FALSE(fixture.monitor->triggerEvent("collision"));
     EXPECT_TRUE(listEventDirs(fixture.recordsRoot).empty());
 }
@@ -237,4 +232,4 @@ TEST(EventMonitorTest, MaxActiveCapturesRejectsExcessEvents) {
     EXPECT_FALSE(fixture.monitor->triggerEvent("collision"));
 }
 
-}  // namespace
+} // namespace

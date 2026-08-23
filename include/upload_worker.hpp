@@ -27,11 +27,11 @@
 class UploadWorker {
 public:
     struct Config {
-        std::string url;  // 接收端地址, 如 http://192.168.1.10:8080/upload
+        std::string url; // 接收端地址, 如 http://192.168.1.10:8080/upload
         long timeoutSeconds{30};
         int maxRetries{5};
         std::chrono::milliseconds scanPeriod{2000};
-        std::chrono::milliseconds retryBackoff{15000};  // 首次重试等待, 之后指数翻倍
+        std::chrono::milliseconds retryBackoff{15000}; // 首次重试等待, 之后指数翻倍
     };
 
     UploadWorker(std::filesystem::path recordRoot, Config config, rclcpp::Logger logger)
@@ -74,8 +74,8 @@ public:
     std::vector<std::filesystem::path> findUploadCandidates() const {
         std::vector<std::filesystem::path> candidates;
         std::error_code error;
-        for (std::filesystem::directory_iterator it(recordRoot_, error), end;
-             !error && it != end; it.increment(error)) {
+        for (std::filesystem::directory_iterator it(recordRoot_, error), end; !error && it != end;
+             it.increment(error)) {
             std::error_code entryError;
             if (!it->is_directory(entryError) || entryError) {
                 continue;
@@ -97,8 +97,7 @@ public:
             return false;
         }
         std::ostringstream content;
-        content << "url=" << config_.url << "\nfiles="
-                << countUploadableFiles(directory) << "\n";
+        content << "url=" << config_.url << "\nfiles=" << countUploadableFiles(directory) << "\n";
         std::ofstream output(directory / ".uploaded", std::ios::trunc);
         output << content.str();
         return static_cast<bool>(output);
@@ -113,20 +112,18 @@ private:
     static bool isMarkerOrTemp(const std::filesystem::path& file) {
         const auto name = file.filename().string();
         if (name.size() > 1 && name[0] == '.') {
-            return true;  // .complete / .uploaded / .upload_failed
+            return true; // .complete / .uploaded / .upload_failed
         }
         return file.extension() == ".tmp";
     }
 
-    static std::vector<std::filesystem::path> collectFiles(
-        const std::filesystem::path& directory) {
+    static std::vector<std::filesystem::path> collectFiles(const std::filesystem::path& directory) {
         std::vector<std::filesystem::path> files;
         std::error_code error;
         for (std::filesystem::recursive_directory_iterator it(directory, error), end;
              !error && it != end; it.increment(error)) {
             std::error_code entryError;
-            if (it->is_regular_file(entryError) && !entryError &&
-                !isMarkerOrTemp(it->path())) {
+            if (it->is_regular_file(entryError) && !entryError && !isMarkerOrTemp(it->path())) {
                 files.push_back(it->path());
             }
         }
@@ -145,8 +142,7 @@ private:
         return bytes;
     }
 
-    static bool readFileBytes(const std::filesystem::path& file,
-                              std::vector<std::uint8_t>& bytes) {
+    static bool readFileBytes(const std::filesystem::path& file, std::vector<std::uint8_t>& bytes) {
         std::ifstream input(file, std::ios::binary | std::ios::ate);
         if (!input.is_open()) {
             return false;
@@ -186,8 +182,8 @@ private:
         for (const auto& file : files) {
             auto part = curl_mime_addpart(mime);
             curl_mime_name(part, "files");
-            curl_mime_filename(
-                part, std::filesystem::relative(file, directory).generic_string().c_str());
+            curl_mime_filename(part,
+                               std::filesystem::relative(file, directory).generic_string().c_str());
             buffers.emplace_back();
             if (!readFileBytes(file, buffers.back())) {
                 RCLCPP_ERROR(logger_, "Cannot read %s for upload", file.string().c_str());
@@ -231,8 +227,7 @@ private:
                          result != CURLE_OK ? curl_easy_strerror(result) : "server rejected",
                          httpCode, response.substr(0, 200).c_str());
         } else {
-            RCLCPP_INFO(logger_, "Uploaded %s (%zu files)",
-                        eventName.c_str(), files.size());
+            RCLCPP_INFO(logger_, "Uploaded %s (%zu files)", eventName.c_str(), files.size());
         }
 
         curl_slist_free_all(headers);
@@ -283,23 +278,19 @@ private:
                 auto& state = pending_[directory.string()];
                 ++state.attempts;
                 if (config_.maxRetries > 0 && state.attempts >= config_.maxRetries) {
-                    RCLCPP_ERROR(logger_,
-                                 "Upload of %s exceeded %d retries; marked failed",
-                                 directory.filename().string().c_str(),
-                                 config_.maxRetries);
+                    RCLCPP_ERROR(logger_, "Upload of %s exceeded %d retries; marked failed",
+                                 directory.filename().string().c_str(), config_.maxRetries);
                     std::ofstream failed(directory / ".upload_failed", std::ios::trunc);
                     failed << "attempts=" << state.attempts << "\n";
                     pending_.erase(directory.string());
                     continue;
                 }
                 // 指数退避: backoff * 2^(attempts-1), 封顶 64 倍
-                const auto delay = config_.retryBackoff *
-                    (1LL << std::min(state.attempts - 1, 6));
+                const auto delay = config_.retryBackoff * (1LL << std::min(state.attempts - 1, 6));
                 state.nextAttempt = now + delay;
                 RCLCPP_WARN(logger_, "Upload of %s failed (%d/%d); retry in %lld ms",
                             directory.filename().string().c_str(), state.attempts,
-                            config_.maxRetries,
-                            static_cast<long long>(delay.count()));
+                            config_.maxRetries, static_cast<long long>(delay.count()));
             }
 
             std::unique_lock<std::mutex> lock(mutex_);

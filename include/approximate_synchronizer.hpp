@@ -22,15 +22,14 @@ public:
     using Image = sensor_msgs::msg::Image;
     using PointCloud = sensor_msgs::msg::PointCloud2;
     using MatchCallback = std::function<void(const Image::SharedPtr&, const PointCloud::SharedPtr&,
-                                              rclcpp::Duration)>;
-    using DropCallback = std::function<void(const std::string&, const rclcpp::Time&,
-                                             std::uint64_t, const std::string&)>;
+                                             rclcpp::Duration)>;
+    using DropCallback = std::function<void(const std::string&, const rclcpp::Time&, std::uint64_t,
+                                            const std::string&)>;
 
     ApproximateSynchronizer(std::size_t queueSize, rclcpp::Duration tolerance,
                             MatchCallback callback, DropCallback dropCallback = {})
-        : queueSize_(std::max<std::size_t>(1, queueSize)),
-          tolerance_(tolerance), callback_(std::move(callback)),
-          dropCallback_(std::move(dropCallback)) {}
+        : queueSize_(std::max<std::size_t>(1, queueSize)), tolerance_(tolerance),
+          callback_(std::move(callback)), dropCallback_(std::move(dropCallback)) {}
 
     void addImage(const Image::SharedPtr& image) {
         PendingResults results;
@@ -81,8 +80,7 @@ public:
     }
 
 private:
-    template<typename Message>
-    static rclcpp::Time stamp(const std::shared_ptr<Message>& message) {
+    template <typename Message> static rclcpp::Time stamp(const std::shared_ptr<Message>& message) {
         return rclcpp::Time(message->header.stamp);
     }
 
@@ -118,12 +116,11 @@ private:
     // each arrival O(1) amortized instead of the previous full O(N*M) scan.
     void tryMatchLocked(PendingResults& results) {
         while (!images_.empty() && !clouds_.empty()) {
-            const auto difference = (stamp(images_.front()) - stamp(clouds_.front()))
-                                        .nanoseconds();
+            const auto difference = (stamp(images_.front()) - stamp(clouds_.front())).nanoseconds();
             if (std::llabs(difference) <= tolerance_.nanoseconds()) {
-                results.matches.push_back(MatchResult{images_.front(), clouds_.front(),
-                                                      rclcpp::Duration::from_nanoseconds(
-                                                          std::llabs(difference))});
+                results.matches.push_back(
+                    MatchResult{images_.front(), clouds_.front(),
+                                rclcpp::Duration::from_nanoseconds(std::llabs(difference))});
                 images_.pop_front();
                 clouds_.pop_front();
                 continue;

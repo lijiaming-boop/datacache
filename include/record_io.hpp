@@ -21,16 +21,16 @@
 namespace record_io {
 
 struct ManifestEntry {
-    std::string sensor;       // camera | lidar
+    std::string sensor; // camera | lidar
     std::int64_t timestampNs{0};
-    std::string file;         // 相对事件目录的记录文件名
-    std::string encoding;     // zstd | raw
-    std::string convertedFile;  // 转换副本相对路径, 可为空
+    std::string file;          // 相对事件目录的记录文件名
+    std::string encoding;      // zstd | raw
+    std::string convertedFile; // 转换副本相对路径, 可为空
 };
 
 struct PairEntry {
     std::uint64_t pairId{0};
-    std::string status;   // matched | camera_only | lidar_only
+    std::string status; // matched | camera_only | lidar_only
     std::int64_t cameraTimestampNs{0};
     std::int64_t lidarTimestampNs{0};
     std::int64_t timeDiffNs{0};
@@ -75,9 +75,8 @@ inline bool parseU64(const std::string& text, std::uint64_t& value) {
 
 // 解析 manifest.csv；文件不存在或只有表头时返回空。
 // problems 非空时, 崩溃等留下的撕裂/畸形行记入 problems 而不是抛异常。
-inline std::vector<ManifestEntry> readManifest(
-    const std::filesystem::path& eventDirectory,
-    std::vector<std::string>* problems = nullptr) {
+inline std::vector<ManifestEntry> readManifest(const std::filesystem::path& eventDirectory,
+                                               std::vector<std::string>* problems = nullptr) {
     std::vector<ManifestEntry> entries;
     const auto note = [problems](const std::string& message) {
         if (problems != nullptr) {
@@ -89,7 +88,7 @@ inline std::vector<ManifestEntry> readManifest(
         return entries;
     }
     std::string line;
-    std::getline(input, line);  // 表头
+    std::getline(input, line); // 表头
     std::size_t lineNumber = 1;
     while (std::getline(input, line)) {
         ++lineNumber;
@@ -105,8 +104,8 @@ inline std::vector<ManifestEntry> readManifest(
         ManifestEntry entry;
         entry.sensor = fields[0];
         if (!parseI64(fields[1], entry.timestampNs)) {
-            note("manifest.csv line " + std::to_string(lineNumber) +
-                 ": invalid timestamp '" + fields[1] + "'");
+            note("manifest.csv line " + std::to_string(lineNumber) + ": invalid timestamp '" +
+                 fields[1] + "'");
             continue;
         }
         entry.file = fields[2];
@@ -119,9 +118,8 @@ inline std::vector<ManifestEntry> readManifest(
     return entries;
 }
 
-inline std::vector<PairEntry> readPairs(
-    const std::filesystem::path& eventDirectory,
-    std::vector<std::string>* problems = nullptr) {
+inline std::vector<PairEntry> readPairs(const std::filesystem::path& eventDirectory,
+                                        std::vector<std::string>* problems = nullptr) {
     std::vector<PairEntry> entries;
     const auto note = [problems](const std::string& message) {
         if (problems != nullptr) {
@@ -133,7 +131,7 @@ inline std::vector<PairEntry> readPairs(
         return entries;
     }
     std::string line;
-    std::getline(input, line);  // 表头
+    std::getline(input, line); // 表头
     std::size_t lineNumber = 1;
     while (std::getline(input, line)) {
         ++lineNumber;
@@ -142,22 +140,21 @@ inline std::vector<PairEntry> readPairs(
         }
         const auto fields = splitCsvLine(line);
         if (fields.size() < 6) {
-            note("pairs.csv line " + std::to_string(lineNumber) +
-                 ": expected 6 fields, got " + std::to_string(fields.size()));
+            note("pairs.csv line " + std::to_string(lineNumber) + ": expected 6 fields, got " +
+                 std::to_string(fields.size()));
             continue;
         }
         PairEntry entry;
         if (!parseU64(fields[0], entry.pairId)) {
-            note("pairs.csv line " + std::to_string(lineNumber) +
-                 ": invalid pair_id '" + fields[0] + "'");
+            note("pairs.csv line " + std::to_string(lineNumber) + ": invalid pair_id '" +
+                 fields[0] + "'");
             continue;
         }
         entry.status = fields[1];
         if ((!fields[2].empty() && !parseI64(fields[2], entry.cameraTimestampNs)) ||
             (!fields[3].empty() && !parseI64(fields[3], entry.lidarTimestampNs)) ||
             !parseI64(fields[4], entry.timeDiffNs)) {
-            note("pairs.csv line " + std::to_string(lineNumber) +
-                 ": invalid numeric field");
+            note("pairs.csv line " + std::to_string(lineNumber) + ": invalid numeric field");
             continue;
         }
         entry.reason = fields[5];
@@ -166,8 +163,7 @@ inline std::vector<PairEntry> readPairs(
     return entries;
 }
 
-inline bool readFileBytes(const std::filesystem::path& file,
-                          std::vector<std::uint8_t>& bytes) {
+inline bool readFileBytes(const std::filesystem::path& file, std::vector<std::uint8_t>& bytes) {
     std::ifstream input(file, std::ios::binary | std::ios::ate);
     if (!input.is_open()) {
         return false;
@@ -179,8 +175,7 @@ inline bool readFileBytes(const std::filesystem::path& file,
     }
     bytes.resize(static_cast<std::size_t>(size));
     input.seekg(0);
-    input.read(reinterpret_cast<char*>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     return static_cast<bool>(input);
 }
 
@@ -188,8 +183,7 @@ inline bool readFileBytes(const std::filesystem::path& file,
 inline bool decompressZstd(const std::uint8_t* data, std::size_t size,
                            std::vector<std::uint8_t>& out, std::string& error) {
     const auto contentSize = ZSTD_getFrameContentSize(data, size);
-    if (contentSize != ZSTD_CONTENTSIZE_ERROR &&
-        contentSize != ZSTD_CONTENTSIZE_UNKNOWN) {
+    if (contentSize != ZSTD_CONTENTSIZE_ERROR && contentSize != ZSTD_CONTENTSIZE_UNKNOWN) {
         out.resize(static_cast<std::size_t>(contentSize));
         const auto decoded = ZSTD_decompress(out.data(), out.size(), data, size);
         if (ZSTD_isError(decoded)) {
@@ -216,10 +210,10 @@ inline bool decompressZstd(const std::uint8_t* data, std::size_t size,
         out.insert(out.end(), chunk.begin(),
                    chunk.begin() + static_cast<std::ptrdiff_t>(outBuffer.pos));
         if (result == 0) {
-            break;  // 帧解压完成
+            break; // 帧解压完成
         }
         if (in.pos == in.size && outBuffer.pos == 0) {
-            error = "truncated zstd frame";  // 输入耗尽但无进展
+            error = "truncated zstd frame"; // 输入耗尽但无进展
             ZSTD_freeDStream(stream);
             return false;
         }
@@ -229,10 +223,8 @@ inline bool decompressZstd(const std::uint8_t* data, std::size_t size,
 }
 
 // 读取一条落盘记录: encoding 为 "zstd" 时自动解压
-inline bool loadRecordBytes(const std::filesystem::path& directory,
-                            const ManifestEntry& entry,
-                            std::vector<std::uint8_t>& bytes,
-                            std::string& error) {
+inline bool loadRecordBytes(const std::filesystem::path& directory, const ManifestEntry& entry,
+                            std::vector<std::uint8_t>& bytes, std::string& error) {
     std::vector<std::uint8_t> fileBytes;
     if (!readFileBytes(directory / entry.file, fileBytes)) {
         error = "cannot read " + entry.file;
@@ -245,9 +237,9 @@ inline bool loadRecordBytes(const std::filesystem::path& directory,
     return true;
 }
 
-template<typename Message>
-bool deserializeMessage(const std::vector<std::uint8_t>& bytes,
-                        Message& message, std::string& error) {
+template <typename Message>
+bool deserializeMessage(const std::vector<std::uint8_t>& bytes, Message& message,
+                        std::string& error) {
     try {
         rclcpp::SerializedMessage serialized(bytes.size());
         auto& raw = serialized.get_rcl_serialized_message();
@@ -264,8 +256,8 @@ bool deserializeMessage(const std::vector<std::uint8_t>& bytes,
 // ---- 完整性校验 ----
 
 struct VerifyOptions {
-    std::string sensor;  // "" = 相机与雷达都校验
-    std::size_t limit{0};  // 0 = 不限制条数
+    std::string sensor;   // "" = 相机与雷达都校验
+    std::size_t limit{0}; // 0 = 不限制条数
 };
 
 struct VerificationReport {
@@ -279,8 +271,8 @@ struct VerificationReport {
 };
 
 // 逐条校验: 文件存在 -> 可解压 -> 可反序列化 -> 消息字段自洽
-inline VerificationReport verifyEventDirectory(
-    const std::filesystem::path& eventDirectory, const VerifyOptions& options = {}) {
+inline VerificationReport verifyEventDirectory(const std::filesystem::path& eventDirectory,
+                                               const VerifyOptions& options = {}) {
     VerificationReport report;
     const std::size_t problemsBefore = report.problems.size();
     const auto entries = readManifest(eventDirectory, &report.problems);
@@ -322,8 +314,7 @@ inline VerificationReport verifyEventDirectory(
                 continue;
             }
             if (image.width == 0 || image.height == 0 || image.step == 0 ||
-                image.encoding.empty() ||
-                image.step * image.height > image.data.size()) {
+                image.encoding.empty() || image.step * image.height > image.data.size()) {
                 ++report.failedEntries;
                 report.problems.push_back(label + ": inconsistent image fields");
                 continue;
@@ -350,11 +341,10 @@ inline VerificationReport verifyEventDirectory(
         ++report.verifiedEntries;
         if (!entry.convertedFile.empty() &&
             !std::filesystem::exists(eventDirectory / entry.convertedFile)) {
-            report.warnings.push_back(label + ": converted copy missing: " +
-                                      entry.convertedFile);
+            report.warnings.push_back(label + ": converted copy missing: " + entry.convertedFile);
         }
     }
     return report;
 }
 
-}  // namespace record_io
+} // namespace record_io

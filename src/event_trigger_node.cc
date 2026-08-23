@@ -23,15 +23,13 @@ public:
                 const auto name = request->event_name.empty() ? eventName_ : request->event_name;
                 response->success = sendTrigger(name);
                 response->message = response->success
-                    ? "Queued event '" + name + "' for datacache_node"
-                    : "Failed to reach datacache_node";
+                                        ? "Queued event '" + name + "' for datacache_node"
+                                        : "Failed to reach datacache_node";
             });
 
         if (interval > 0) {
             const auto period = std::chrono::seconds(interval);
-            timer_ = create_wall_timer(period, [this]() {
-                sendTrigger(eventName_);
-            });
+            timer_ = create_wall_timer(period, [this]() { sendTrigger(eventName_); });
             RCLCPP_INFO(get_logger(), "Auto-trigger enabled [event=%s, interval=%ds]",
                         eventName_.c_str(), interval);
         } else {
@@ -51,7 +49,8 @@ private:
 
         auto request = std::make_shared<datacache::srv::EventTrigger::Request>();
         request->event_name = eventName;
-        client_->async_send_request(request,
+        client_->async_send_request(
+            request,
             [this, eventName](rclcpp::Client<datacache::srv::EventTrigger>::SharedFuture future) {
                 const auto result = future.get();
                 if (result->success) {

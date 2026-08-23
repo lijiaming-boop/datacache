@@ -5,7 +5,7 @@
       <name>datacache</name>
       <version>1.0.0</version>
       <description>Sensor data caching and event-triggered recording system</description>
-      <maintainer email="dev@example.com">developer</maintainer>
+      <maintainer email="2701398761@qq.com">Lijiaming</maintainer>
       <license>MIT</license>
 
       <buildtool_depend>ament_cmake</buildtool_depend>

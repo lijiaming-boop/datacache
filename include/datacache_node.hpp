@@ -31,9 +31,8 @@ private:
 
     void handleImage(sensor_msgs::msg::Image::SharedPtr message);
     void handlePointCloud(sensor_msgs::msg::PointCloud2::SharedPtr message);
-    void handleTrigger(
-        const std::shared_ptr<datacache::srv::EventTrigger::Request>& request,
-        const std::shared_ptr<datacache::srv::EventTrigger::Response>& response);
+    void handleTrigger(const std::shared_ptr<datacache::srv::EventTrigger::Request>& request,
+                       const std::shared_ptr<datacache::srv::EventTrigger::Response>& response);
 
     std::shared_ptr<ConfigManager> configManager_;
     std::shared_ptr<DataBuffer> dataBuffer_;

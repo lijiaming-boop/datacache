@@ -23,8 +23,7 @@ namespace {
 // 进程内最小 HTTP 服务器: 读完整个请求后返回固定状态码, 记录收到的字节
 class MiniServer {
 public:
-    MiniServer(int status, const std::string& body)
-        : status_(status), body_(body) {
+    MiniServer(int status, const std::string& body) : status_(status), body_(body) {
         listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listenFd_ < 0) {
             throw std::runtime_error("socket() failed");
@@ -36,15 +35,13 @@ public:
         address.sin_family = AF_INET;
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         address.sin_port = 0;
-        if (::bind(listenFd_, reinterpret_cast<sockaddr*>(&address),
-                   sizeof(address)) != 0 ||
+        if (::bind(listenFd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
             ::listen(listenFd_, 4) != 0) {
             throw std::runtime_error("bind/listen failed");
         }
 
         socklen_t length = sizeof(address);
-        if (::getsockname(listenFd_, reinterpret_cast<sockaddr*>(&address),
-                          &length) != 0) {
+        if (::getsockname(listenFd_, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
             throw std::runtime_error("getsockname failed");
         }
         port_ = ntohs(address.sin_port);
@@ -97,8 +94,7 @@ private:
         std::size_t contentLength = 0;
         const auto position = request.find("Content-Length:");
         if (position != std::string::npos) {
-            contentLength = static_cast<std::size_t>(
-                std::stoull(request.substr(position + 15)));
+            contentLength = static_cast<std::size_t>(std::stoull(request.substr(position + 15)));
         }
         const auto headerEnd = request.find("\r\n\r\n") + 4;
         while (request.size() - headerEnd < contentLength) {
@@ -117,12 +113,12 @@ private:
 
         const auto statusText = status_ == 200 ? "OK" : "Internal Server Error";
         std::string response = "HTTP/1.1 " + std::to_string(status_) + " " + statusText +
-            "\r\nContent-Type: application/json\r\nContent-Length: " +
-            std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" + body_;
+                               "\r\nContent-Type: application/json\r\nContent-Length: " +
+                               std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" +
+                               body_;
         std::size_t sent = 0;
         while (sent < response.size()) {
-            const auto bytes = ::send(client, response.data() + sent,
-                                      response.size() - sent, 0);
+            const auto bytes = ::send(client, response.data() + sent, response.size() - sent, 0);
             if (bytes <= 0) {
                 break;
             }
@@ -144,9 +140,9 @@ private:
 std::filesystem::path makeTempDir(const std::string& tag) {
     static std::uint64_t counter = 0;
     const auto dir = std::filesystem::temp_directory_path() /
-        ("datacache_upload_" + tag + "_" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-         "_" + std::to_string(++counter));
+                     ("datacache_upload_" + tag + "_" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                      "_" + std::to_string(++counter));
     std::filesystem::create_directories(dir);
     return dir;
 }
@@ -215,8 +211,7 @@ TEST(UploadWorkerTest, UploadDirectoryPostsAndMarksUploaded) {
 
     // 服务端收到了完整请求: 事件名出现在 query, 文件名与内容出现在 multipart 体
     const auto& received = server.received();
-    EXPECT_NE(received.find("POST /upload?event=collision_1700000000000000000"),
-              std::string::npos);
+    EXPECT_NE(received.find("POST /upload?event=collision_1700000000000000000"), std::string::npos);
     EXPECT_NE(received.find("manifest.csv"), std::string::npos);
     EXPECT_NE(received.find("images/camera_1.jpg"), std::string::npos);
     EXPECT_NE(received.find("compressed-bytes"), std::string::npos);
@@ -258,8 +253,7 @@ TEST(UploadWorkerTest, BackgroundLoopUploadsThenIdles) {
     worker.start();
 
     // 后台线程应在几个扫描周期内完成上传并写标记
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!std::filesystem::exists(event / ".uploaded")) {
         ASSERT_LT(std::chrono::steady_clock::now(), deadline)
             << "background upload did not finish in time";
@@ -282,14 +276,13 @@ TEST(UploadWorkerTest, RetriesExhaustedWritesFailedMarkerAndStops) {
 
     auto config = localConfig(server.port());
     config.maxRetries = 3;
-    config.retryBackoff = std::chrono::milliseconds(50);  // 50ms → 100ms → 200ms
+    config.retryBackoff = std::chrono::milliseconds(50); // 50ms → 100ms → 200ms
     config.scanPeriod = std::chrono::milliseconds(30);
     UploadWorker worker(root, config, rclcpp::get_logger("test"));
     worker.start();
 
     // 重试耗尽后写 .upload_failed 终态标记
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (!std::filesystem::exists(event / ".upload_failed")) {
         ASSERT_LT(std::chrono::steady_clock::now(), deadline)
             << "upload did not exhaust retries in time";
@@ -321,7 +314,7 @@ TEST(UploadWorkerTest, BackoffDelaysRetryAttempts) {
 
     auto config = localConfig(server.port());
     config.maxRetries = 3;
-    config.retryBackoff = std::chrono::milliseconds(200);  // 200ms → 400ms
+    config.retryBackoff = std::chrono::milliseconds(200); // 200ms → 400ms
     config.scanPeriod = std::chrono::milliseconds(20);
     UploadWorker worker(root, config, rclcpp::get_logger("test"));
     worker.start();
@@ -345,4 +338,4 @@ TEST(UploadWorkerTest, BackoffDelaysRetryAttempts) {
     std::filesystem::remove_all(root, error);
 }
 
-}  // namespace
+} // namespace

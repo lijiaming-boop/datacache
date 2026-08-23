@@ -19,9 +19,9 @@
 class DiskSpaceManager {
 public:
     struct Policy {
-        std::uintmax_t minFreeBytes{0};      // 写前最低剩余空间，0 = 禁用
-        std::uintmax_t maxCapacityBytes{0};  // records 总量上限，0 = 禁用
-        int retentionDays{0};                // 事件目录保留天数，0 = 禁用
+        std::uintmax_t minFreeBytes{0};     // 写前最低剩余空间，0 = 禁用
+        std::uintmax_t maxCapacityBytes{0}; // records 总量上限，0 = 禁用
+        int retentionDays{0};               // 事件目录保留天数，0 = 禁用
         std::chrono::seconds cleanupInterval{60};
     };
 
@@ -81,10 +81,11 @@ public:
         auto eventDirs = collectEventDirs();
 
         if (ageEnabled) {
-            const auto cutoffNs = systemNowNs() - static_cast<std::int64_t>(policy_.retentionDays)
-                * 24LL * 3600LL * 1000000000LL;
+            const auto cutoffNs = systemNowNs() - static_cast<std::int64_t>(policy_.retentionDays) *
+                                                      24LL * 3600LL * 1000000000LL;
             // collectEventDirs 已按时间戳升序排序，越过阈值即可停止
-            for (auto it = eventDirs.begin(); it != eventDirs.end() && it->timestampNs < cutoffNs;) {
+            for (auto it = eventDirs.begin();
+                 it != eventDirs.end() && it->timestampNs < cutoffNs;) {
                 if (deleteDir(*it, "older than retention days")) {
                     it = eventDirs.erase(it);
                 } else {
@@ -122,8 +123,8 @@ private:
     std::vector<EventDir> collectEventDirs() const {
         std::vector<EventDir> dirs;
         std::error_code error;
-        for (std::filesystem::directory_iterator it(recordRoot_, error), end;
-             !error && it != end; it.increment(error)) {
+        for (std::filesystem::directory_iterator it(recordRoot_, error), end; !error && it != end;
+             it.increment(error)) {
             std::error_code entryError;
             if (!it->is_directory(entryError) || entryError) {
                 continue;
@@ -143,8 +144,7 @@ private:
     // 下界 9 位（纳秒级 epoch）用于排除 <event>_123 之类的无关命名
     static std::int64_t parseEventTimestamp(const std::string& name) {
         const auto separator = name.find_last_of('_');
-        if (separator == std::string::npos || separator == 0 ||
-            separator + 1 >= name.size()) {
+        if (separator == std::string::npos || separator == 0 || separator + 1 >= name.size()) {
             return -1;
         }
         const auto digits = name.substr(separator + 1);
@@ -192,10 +192,10 @@ private:
         std::error_code error;
         auto info = std::filesystem::space(recordRoot_, error);
         if (error) {
-            info = std::filesystem::space(".", error);  // root 尚未创建时退回当前目录所在卷
+            info = std::filesystem::space(".", error); // root 尚未创建时退回当前目录所在卷
         }
         if (error) {
-            return std::numeric_limits<std::uintmax_t>::max();  // stat 失败按充足处理，不中断录制
+            return std::numeric_limits<std::uintmax_t>::max(); // stat 失败按充足处理，不中断录制
         }
         return info.available;
     }
@@ -208,8 +208,7 @@ private:
                         dir.path.string().c_str(), error.message().c_str());
             return false;
         }
-        RCLCPP_INFO(logger_, "Deleted event directory %s (%s)",
-                    dir.path.string().c_str(), reason);
+        RCLCPP_INFO(logger_, "Deleted event directory %s (%s)", dir.path.string().c_str(), reason);
         return true;
     }
 
