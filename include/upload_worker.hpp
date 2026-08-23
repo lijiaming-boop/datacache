@@ -178,7 +178,8 @@ private:
             return false;
         }
 
-        // 文件内容必须在 curl_easy_perform 返回前保持有效(curl_mime_data 不拷贝)
+        // curl_mime_data 本身会拷贝数据, 缓冲区保留到 perform 结束只是保守起见;
+        // 大目录上传的峰值内存优化(改用 curl_mime_file_cb 流式读取)留作后续
         std::vector<std::vector<std::uint8_t>> buffers;
         buffers.reserve(files.size());
         curl_mime* mime = curl_mime_init(curl);

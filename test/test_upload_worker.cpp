@@ -272,4 +272,77 @@ TEST(UploadWorkerTest, BackgroundLoopUploadsThenIdles) {
     std::filesystem::remove_all(root, error);
 }
 
+TEST(UploadWorkerTest, RetriesExhaustedWritesFailedMarkerAndStops) {
+    MiniServer server(500, "{\"status\":\"error\"}");
+
+    const auto root = makeTempDir("retry");
+    const auto event = root / "collision_1700000000000000000";
+    writeFile(event / ".complete", "records=1\n");
+    writeFile(event / "camera_1.bin.zst", "compressed-bytes");
+
+    auto config = localConfig(server.port());
+    config.maxRetries = 3;
+    config.retryBackoff = std::chrono::milliseconds(50);  // 50ms → 100ms → 200ms
+    config.scanPeriod = std::chrono::milliseconds(30);
+    UploadWorker worker(root, config, rclcpp::get_logger("test"));
+    worker.start();
+
+    // 重试耗尽后写 .upload_failed 终态标记
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!std::filesystem::exists(event / ".upload_failed")) {
+        ASSERT_LT(std::chrono::steady_clock::now(), deadline)
+            << "upload did not exhaust retries in time";
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    // 终态之后: 再等几个扫描周期也不应有新请求, 且不再是候选
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(server.requests(), 3);
+    EXPECT_TRUE(worker.findUploadCandidates().empty());
+    worker.stop();
+
+    std::ifstream failedMarker(event / ".upload_failed");
+    const std::string content((std::istreambuf_iterator<char>(failedMarker)),
+                              std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("attempts=3"), std::string::npos);
+
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+}
+
+TEST(UploadWorkerTest, BackoffDelaysRetryAttempts) {
+    MiniServer server(500, "{\"status\":\"error\"}");
+
+    const auto root = makeTempDir("backoff");
+    const auto event = root / "collision_1700000000000000000";
+    writeFile(event / ".complete", "records=1\n");
+    writeFile(event / "camera_1.bin.zst", "compressed-bytes");
+
+    auto config = localConfig(server.port());
+    config.maxRetries = 3;
+    config.retryBackoff = std::chrono::milliseconds(200);  // 200ms → 400ms
+    config.scanPeriod = std::chrono::milliseconds(20);
+    UploadWorker worker(root, config, rclcpp::get_logger("test"));
+    worker.start();
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(10);
+    while (!std::filesystem::exists(event / ".upload_failed")) {
+        ASSERT_LT(std::chrono::steady_clock::now(), deadline)
+            << "upload did not exhaust retries in time";
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    worker.stop();
+
+    // 三次请求之间的退避合计至少 200+400=600ms(指数递增), 即排除"每轮扫描都
+    // 立即重试"的退化行为; 上界留给调度与网络开销足够宽松
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 600);
+    EXPECT_EQ(server.requests(), 3);
+
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+}
+
 }  // namespace

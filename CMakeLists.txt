@@ -109,6 +109,14 @@ if(BUILD_TESTING)
   target_link_libraries(test_record_io ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES})
   ament_target_dependencies(test_record_io pcl_conversions)
 
+  datacache_add_test(test_disk_space_manager test/test_disk_space_manager.cpp)
+
+  datacache_add_test(test_event_monitor test/test_event_monitor.cpp src/config_manager.cpp)
+  target_include_directories(test_event_monitor PRIVATE ${ZSTD_INCLUDE_DIR} ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_event_monitor
+    ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES} Threads::Threads)
+  ament_target_dependencies(test_event_monitor pcl_conversions)
+
   datacache_add_test(test_upload_worker test/test_upload_worker.cpp)
   target_link_libraries(test_upload_worker CURL::libcurl Threads::Threads)
 endif()

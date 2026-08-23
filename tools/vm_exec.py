@@ -9,7 +9,7 @@
   python tools/vm_exec.py get <remote> <local>   拉取虚拟机文件
   python tools/vm_exec.py put <local> <remote>   推送单个文件
 
-连接参数可用环境变量覆盖: VM_HOST / VM_USER / VM_PASSWORD
+连接参数必须通过环境变量提供: VM_HOST / VM_USER / VM_PASSWORD (可选 VM_ROOT)
 """
 
 import argparse
@@ -20,9 +20,9 @@ import time
 
 import paramiko
 
-HOST = os.environ.get("VM_HOST", "192.168.101.129")
-USER = os.environ.get("VM_USER", "ljm")
-PASSWORD = os.environ.get("VM_PASSWORD", "111")
+HOST = os.environ.get("VM_HOST", "")
+USER = os.environ.get("VM_USER", "")
+PASSWORD = os.environ.get("VM_PASSWORD", "")
 REMOTE_ROOT = os.environ.get("VM_ROOT", "datacache")
 
 # 同步时跳过的目录: 构建产物与本地产物不进虚拟机
@@ -83,6 +83,14 @@ def main():
     parser.add_argument("args", nargs="*", help="命令参数")
     parser.add_argument("--timeout", type=int, default=900)
     options = parser.parse_args()
+
+    missing = [name for name, value in
+               (("VM_HOST", HOST), ("VM_USER", USER), ("VM_PASSWORD", PASSWORD))
+               if not value]
+    if missing:
+        sys.exit("缺少连接参数: " + ", ".join(missing) + "\n"
+                 "请通过环境变量提供, 例如: VM_HOST=192.168.1.10 VM_USER=ubuntu "
+                 "VM_PASSWORD=xxx python tools/vm_exec.py check")
 
     client = connect()
     try:

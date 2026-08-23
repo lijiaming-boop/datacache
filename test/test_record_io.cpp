@@ -224,4 +224,45 @@ TEST(RecordIoTest, VerifyHandlesMissingManifestAndSensorFilter) {
     std::filesystem::remove_all(empty, error);
 }
 
+TEST(RecordIoTest, TornManifestLinesAreReportedNotThrown) {
+    Fixture fixture;
+    fixture.write();
+
+    // 追加一行撕裂的 manifest 行(崩溃残留): 解析不抛异常, 计入 problems,
+    // 且 --verify 语义下(verifyEventDirectory)整体判定为失败
+    {
+        std::ofstream append(fixture.eventDir / "manifest.csv", std::ios::app);
+        append << "camera,170000000";  // 撕裂: 字段不足
+        append.flush();
+    }
+    std::vector<std::string> problems;
+    const auto entries = record_io::readManifest(fixture.eventDir, &problems);
+    EXPECT_EQ(entries.size(), 2U);
+    ASSERT_EQ(problems.size(), 1U);
+    EXPECT_NE(problems[0].find("manifest.csv line"), std::string::npos);
+
+    const auto report = record_io::verifyEventDirectory(fixture.eventDir);
+    EXPECT_FALSE(report.ok());
+    EXPECT_EQ(report.failedEntries, 1U);
+}
+
+TEST(RecordIoTest, TornPairsLinesAreReportedNotThrown) {
+    const auto dir = makeTempDir("torn_pairs");
+    {
+        std::ofstream output(dir / "pairs.csv", std::ios::trunc);
+        output << "pair_id,status,camera_timestamp,lidar_timestamp,time_diff_ns,reason\n";
+        output << "1,matched,1700000000000000000,1700000000100000000,10000000,\n";
+        output << "2,matched,not-a-number,,,";  // 撕裂: 时间戳字段损坏
+        output.flush();
+    }
+    std::vector<std::string> problems;
+    const auto pairs = record_io::readPairs(dir, &problems);
+    EXPECT_EQ(pairs.size(), 1U);
+    ASSERT_EQ(problems.size(), 1U);
+    EXPECT_NE(problems[0].find("pairs.csv line"), std::string::npos);
+
+    std::error_code error;
+    std::filesystem::remove_all(dir, error);
+}
+
 }  // namespace

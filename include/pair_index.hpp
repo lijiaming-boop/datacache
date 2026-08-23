@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -56,14 +57,15 @@ public:
 
 private:
     void trim() {
+        // deque 队首弹出: 达到上限后每条新记录的淘汰都是 O(1),
+        // 不能用 vector(前端 erase 会整段搬移 ~10MB 数据)
         constexpr std::size_t maxRecords = 100000;
-        if (records_.size() > maxRecords) {
-            records_.erase(records_.begin(), records_.begin() +
-                           static_cast<std::ptrdiff_t>(records_.size() - maxRecords));
+        while (records_.size() > maxRecords) {
+            records_.pop_front();
         }
     }
 
     mutable std::mutex mutex_;
-    std::vector<PairRecord> records_;
+    std::deque<PairRecord> records_;
     std::uint64_t nextId_{1};
 };

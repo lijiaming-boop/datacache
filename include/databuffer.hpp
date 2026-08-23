@@ -2,14 +2,17 @@
 
 #include "data.hpp"
 
-#include <algorithm>
 #include <cstddef>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
 
+// 按条数 + 年龄约束的传感器环形缓存。
+// 每类传感器一条独立 deque, 到达序 ≈ 时间戳序, 因此计数淘汰与年龄淘汰都是
+// 队首弹出: 单条插入摊还 O(1), 不随缓存规模增长。
 class DataBuffer {
 public:
     DataBuffer(std::size_t maxSize, rclcpp::Duration maxAge = rclcpp::Duration::from_seconds(0))
@@ -21,36 +24,21 @@ public:
             return;
         }
         const auto timestamp = timestampOf(data);
-        buffer_.push_back(std::move(data));
-
-        while (countOfType(data.type) > maxSize_) {
-            const auto oldest = std::min_element(
-                buffer_.begin(), buffer_.end(),
-                [type = data.type](const SensorData& left, const SensorData& right) {
-                    if (left.type != type) return false;
-                    if (right.type != type) return true;
-                    return timestampOf(left) < timestampOf(right);
-                });
-            if (oldest != buffer_.end() && oldest->type == data.type) {
-                buffer_.erase(oldest);
-            } else {
-                break;
-            }
-        }
 
         if (!hasLatestTimestamp_ || timestamp > latestTimestamp_) {
             latestTimestamp_ = timestamp;
             hasLatestTimestamp_ = true;
         }
-        if (maxAge_.nanoseconds() > 0 && hasLatestTimestamp_) {
-            const auto oldestAllowed = latestTimestamp_ - maxAge_;
-            buffer_.erase(
-                std::remove_if(buffer_.begin(), buffer_.end(),
-                    [&](const SensorData& item) {
-                        return timestampOf(item) < oldestAllowed;
-                    }),
-                buffer_.end());
+        // 晚到超过年龄上限的数据不入队: 水位推进时它必然被淘汰, 入队只是浪费
+        if (maxAge_.nanoseconds() > 0 && timestamp < latestTimestamp_ - maxAge_) {
+            return;
         }
+        auto& queue = queues_[data.type];
+        queue.push_back(std::move(data));
+        while (queue.size() > maxSize_) {
+            queue.pop_front();
+        }
+        evictExpiredLocked();
     }
 
     std::vector<SensorData> getDataWithinTimeRange(
@@ -58,10 +46,12 @@ public:
         const rclcpp::Time& end) const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<SensorData> result;
-        for (const auto& data : buffer_) {
-            const auto timestamp = timestampOf(data);
-            if (timestamp >= start && timestamp <= end) {
-                result.push_back(data);
+        for (const auto& entry : queues_) {
+            for (const auto& data : entry.second) {
+                const auto timestamp = timestampOf(data);
+                if (timestamp >= start && timestamp <= end) {
+                    result.push_back(data);
+                }
             }
         }
         return result;
@@ -69,7 +59,11 @@ public:
 
     std::vector<SensorData> getAllData() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return {buffer_.begin(), buffer_.end()};
+        std::vector<SensorData> result;
+        for (const auto& entry : queues_) {
+            result.insert(result.end(), entry.second.begin(), entry.second.end());
+        }
+        return result;
     }
 
     // Newest sensor header.stamp across all buffered data; event windows are
@@ -83,10 +77,20 @@ public:
     }
 
 private:
-    std::size_t countOfType(SensorType type) const {
-        return static_cast<std::size_t>(std::count_if(
-            buffer_.begin(), buffer_.end(),
-            [type](const SensorData& item) { return item.type == type; }));
+    // 各队列按各自到达序排列, 队首即最老; 水位(全局最新时间戳 - maxAge)之前的
+    // 数据从队首连续弹出。少数乱序到达且落后超过年龄上限的帧在入队时已被拒绝,
+    // 因此队首弹出即可覆盖全部过期数据。
+    void evictExpiredLocked() {
+        if (maxAge_.nanoseconds() <= 0 || !hasLatestTimestamp_) {
+            return;
+        }
+        const auto oldestAllowed = latestTimestamp_ - maxAge_;
+        for (auto& entry : queues_) {
+            auto& queue = entry.second;
+            while (!queue.empty() && timestampOf(queue.front()) < oldestAllowed) {
+                queue.pop_front();
+            }
+        }
     }
 
     static rclcpp::Time timestampOf(const SensorData& data) {
@@ -94,7 +98,7 @@ private:
     }
 
     mutable std::mutex mutex_;
-    std::deque<SensorData> buffer_;
+    std::map<SensorType, std::deque<SensorData>> queues_;
     std::size_t maxSize_;
     rclcpp::Duration maxAge_;
     rclcpp::Time latestTimestamp_;
