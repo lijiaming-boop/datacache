@@ -1,6 +1,7 @@
 #pragma once
 
 #include "data.hpp"
+#include "disk_space_manager.hpp"
 #include "pair_index.hpp"
 
 #include <algorithm>
@@ -31,8 +32,10 @@
 
 class RawStorageWorker {
 public:
-    explicit RawStorageWorker(rclcpp::Logger logger, std::size_t maxPendingJobs = 20)
+    explicit RawStorageWorker(rclcpp::Logger logger, std::size_t maxPendingJobs = 20,
+                              std::shared_ptr<DiskSpaceManager> diskManager = nullptr)
         : logger_(std::move(logger)), maxPendingJobs_(maxPendingJobs),
+          diskManager_(std::move(diskManager)),
           worker_(&RawStorageWorker::run, this) {}
 
     RawStorageWorker(const RawStorageWorker&) = delete;
@@ -243,6 +246,12 @@ private:
     }
 
     void writeJob(const Job& job) const {
+        if (diskManager_ && !diskManager_->prepareForWrite()) {
+            RCLCPP_ERROR(logger_, "Insufficient disk space; dropping %zu records destined for %s",
+                         job.records.size(), job.directory.string().c_str());
+            return;
+        }
+
         std::error_code error;
         std::filesystem::create_directories(job.directory, error);
         if (error) {
@@ -330,6 +339,10 @@ private:
                      << storedFileName << "," << (compressed ? "zstd" : "raw") << ","
                      << convertedFileName << "\n";
         }
+
+        if (diskManager_) {
+            diskManager_->enforceRetention();
+        }
     }
 
     static void writePairs(const std::filesystem::path& directory,
@@ -350,6 +363,7 @@ private:
 
     rclcpp::Logger logger_;
     std::size_t maxPendingJobs_;
+    std::shared_ptr<DiskSpaceManager> diskManager_;
     std::size_t reservedJobs_{0};
     std::deque<Job> jobs_;
     std::mutex mutex_;

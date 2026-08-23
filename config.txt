@@ -13,6 +13,18 @@ max_pending_storage_jobs=20
 max_active_event_captures=16
 event_scheduler_period_ms=50
 
+# Extra wall-clock time beyond post_time before a post-event capture is
+# collected even though sensor timestamps have not advanced (stalled sensor)
+sensor_stall_grace_ms=5000
+
+# Receive-time sensor freshness watchdog: flag sensors whose data stops
+# arriving (steady clock, independent of header stamps). A sensor is stale
+# after watchdog_stale_timeout_ms without any message; per-sensor overrides
+# use watchdog_<sensor>_stale_timeout_ms
+watchdog_enabled=true
+watchdog_check_period_ms=500
+watchdog_stale_timeout_ms=1000
+
 # Lossless background compression for serialized ROS2 records
 compression_enabled=true
 compression_level=3
@@ -23,6 +35,14 @@ conversion_enabled=true
 image_format=jpg
 image_quality=90
 pointcloud_format=pcd
+
+# Disk space management: refuse new event writes when free space drops below
+# disk_min_free_mb, delete event directories older than retention_days, and
+# keep the records root under retention_max_capacity_mb (0 disables a policy)
+disk_min_free_mb=512
+retention_days=30
+retention_max_capacity_mb=10240
+disk_cleanup_interval_seconds=60
 
 # Event registration
 enable_collision_event=true

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -69,6 +70,16 @@ public:
     std::vector<SensorData> getAllData() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return {buffer_.begin(), buffer_.end()};
+    }
+
+    // Newest sensor header.stamp across all buffered data; event windows are
+    // resolved against this so their bounds stay in the sensor time domain.
+    std::optional<rclcpp::Time> latestSensorTimestamp() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!hasLatestTimestamp_) {
+            return std::nullopt;
+        }
+        return latestTimestamp_;
     }
 
 private:

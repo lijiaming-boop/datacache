@@ -33,7 +33,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io)
 
 # 4 个可执行文件，目标名与 launch 文件里的 executable 一致
-add_executable(datacache_node src/main.cc)
+add_executable(datacache_node src/main.cc src/datacache_node.cpp src/config_manager.cpp)
 add_executable(camera_node src/camera_node.cpp)
 add_executable(lidar_sim_node src/lidar_sim_node.cc)
 add_executable(event_trigger_node src/event_trigger_node.cc)
