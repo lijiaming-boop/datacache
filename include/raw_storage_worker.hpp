@@ -13,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,6 +53,8 @@ public:
         }
     }
 
+    // finalJob: 该事件目录的最后一批写入(post 窗口数据, 或无 post 窗口时的唯一
+    // 一批)。完成后写入 .complete 标记, 上传模块以此识别可回传的事件目录。
     bool enqueue(const std::filesystem::path& directory,
                  std::vector<SensorData> records,
                  bool recordCamera,
@@ -64,7 +67,8 @@ public:
                  int imageQuality,
                  std::string pointCloudFormat,
                  std::vector<PairRecord> pairs = {},
-                 bool reserved = false) {
+                 bool reserved = false,
+                 bool finalJob = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || (!reserved && jobs_.size() + reservedJobs_ >= maxPendingJobs_)) {
             if (reserved && reservedJobs_ > 0) {
@@ -78,7 +82,7 @@ public:
         jobs_.push_back(Job{directory, std::move(records), recordCamera, recordLidar,
                             compressionEnabled, compressionLevel, keepRaw,
                             conversionEnabled, std::move(imageFormat), imageQuality,
-                            std::move(pointCloudFormat), std::move(pairs)});
+                            std::move(pointCloudFormat), std::move(pairs), finalJob});
         if (reserved && reservedJobs_ > 0) {
             --reservedJobs_;
         }
@@ -116,6 +120,7 @@ private:
         int imageQuality;
         std::string pointCloudFormat;
         std::vector<PairRecord> pairs;
+        bool finalJob{false};
     };
 
     static rclcpp::Time timestampOf(const SensorData& data) {
@@ -331,7 +336,7 @@ private:
                     if (converted) {
                         convertedFileName = (convertedDirectory.filename() /
                             (baseName + (record.type == SensorType::CAMERA
-                                ? imageExtension(job.imageFormat) : ".pcd")).string();
+                                ? imageExtension(job.imageFormat) : ".pcd"))).string();
                     }
                 }
             }
@@ -340,9 +345,22 @@ private:
                      << convertedFileName << "\n";
         }
 
+        if (job.finalJob) {
+            writeCompletionMarker(job.directory, job.records.size());
+        }
+
         if (diskManager_) {
             diskManager_->enforceRetention();
         }
+    }
+
+    // .complete 是事件目录写完的信号(原子写入), UploadWorker 据此启动回传
+    static void writeCompletionMarker(const std::filesystem::path& directory,
+                                      std::size_t recordCount) {
+        std::ostringstream content;
+        content << "records=" << recordCount << "\n";
+        const auto text = content.str();
+        writeAtomically(directory / ".complete", text.data(), text.size());
     }
 
     static void writePairs(const std::filesystem::path& directory,

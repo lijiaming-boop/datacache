@@ -6,6 +6,7 @@
 #include "event_monitor.hpp"
 #include "pair_index.hpp"
 #include "sensor_watchdog.hpp"
+#include "upload_worker.hpp"
 
 #include <memory>
 #include <string>
@@ -23,6 +24,7 @@ private:
     void loadConfiguration();
     void createCoreComponents();
     void createWatchdog();
+    void createUploader();
     void registerEvents();
     void createSubscriptions();
     void createTriggerService();
@@ -40,6 +42,7 @@ private:
     std::shared_ptr<EventMonitor> eventMonitor_;
     std::unique_ptr<SensorWatchdog> watchdog_;
     rclcpp::TimerBase::SharedPtr watchdogTimer_;
+    std::unique_ptr<UploadWorker> uploadWorker_;
 
     std::string configPath_;
     int configuredBufferSize_{0};

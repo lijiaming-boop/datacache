@@ -44,6 +44,18 @@ retention_days=30
 retention_max_capacity_mb=10240
 disk_cleanup_interval_seconds=60
 
+# Event upload/backflow: POST completed event directories (marked .complete by
+# the storage worker) to upload_url via HTTP multipart. Successful uploads are
+# marked .uploaded; uploads still failing after upload_max_retries retries are
+# marked .upload_failed. Local data is kept; disk reclamation stays with the
+# retention policies above. Set upload_url to an empty string to disable.
+upload_enabled=false
+upload_url=http://127.0.0.1:8080/upload
+upload_scan_period_ms=2000
+upload_timeout_s=30
+upload_max_retries=5
+upload_retry_backoff_ms=15000
+
 # Event registration
 enable_collision_event=true
 enable_hard_brake_event=true

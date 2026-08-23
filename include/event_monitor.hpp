@@ -115,7 +115,7 @@ public:
         if (postSeconds <= 0) {
             return enqueueRecords(eventDirectory, eventName,
                                   dataBuffer_->getDataWithinTimeRange(startTime, eventTime),
-                                  std::move(preWindowPairs));
+                                  std::move(preWindowPairs), false, true);
         }
 
         EventCaptureTask task{
@@ -210,7 +210,8 @@ private:
             if (flushPendingPairs_) flushPendingPairs_();
             if (!enqueueRecords(task.directory, task.eventName,
                                 dataBuffer_->getDataWithinTimeRange(task.eventTime, task.endTime),
-                                pairIndex_->getDataWithinTimeRange(task.eventTime, task.endTime), true)) {
+                                pairIndex_->getDataWithinTimeRange(task.eventTime, task.endTime),
+                                true, true)) {
                 RCLCPP_ERROR(logger_, "Post-event storage failed for '%s'",
                              task.eventName.c_str());
             }
@@ -235,7 +236,8 @@ private:
                         const std::string& eventName,
                         std::vector<SensorData> records,
                         std::vector<PairRecord> pairs,
-                        bool reserved = false) const {
+                        bool reserved = false,
+                        bool finalJob = false) const {
         const bool recordCamera = getEventBoolConfig(
             eventName, "record_camera", "record_camera", false);
         const bool recordLidar = getEventBoolConfig(
@@ -254,14 +256,14 @@ private:
         return storageWorker_->enqueue(directory, std::move(records), recordCamera, recordLidar,
                                        compressionEnabled, compressionLevel, keepRaw,
                                        conversionEnabled, imageFormat, imageQuality, pointCloudFormat,
-                                       std::move(pairs), reserved);
+                                       std::move(pairs), reserved, finalJob);
     }
 
     std::shared_ptr<DataBuffer> dataBuffer_;
+    std::shared_ptr<ConfigManager> configManager_;
     std::shared_ptr<PairIndex> pairIndex_;
     std::function<void()> flushPendingPairs_;
     std::unordered_map<std::string, std::function<bool()>> eventCallbacks_;
-    std::shared_ptr<ConfigManager> configManager_;
     rclcpp::Logger logger_;
     std::shared_ptr<rclcpp::Clock> clock_;
     rclcpp::Node* node_;

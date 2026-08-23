@@ -10,6 +10,7 @@ DataCacheNode::DataCacheNode() : Node("datacache_node") {
     loadConfiguration();
     createCoreComponents();
     createWatchdog();
+    createUploader();
     registerEvents();
     createSubscriptions();
     createTriggerService();
@@ -100,6 +101,37 @@ void DataCacheNode::createWatchdog() {
         1, configManager_->getIntConfig("watchdog_check_period_ms", 500));
     watchdogTimer_ = create_wall_timer(
         std::chrono::milliseconds(checkPeriodMs), [this]() { watchdog_->poll(); });
+}
+
+void DataCacheNode::createUploader() {
+    if (!configManager_->getBoolConfig("upload_enabled", false)) {
+        RCLCPP_INFO(get_logger(), "Event upload disabled by configuration");
+        return;
+    }
+
+    UploadWorker::Config config;
+    config.url = configManager_->getConfig("upload_url");
+    if (config.url.empty()) {
+        RCLCPP_WARN(get_logger(),
+                    "upload_enabled=true but upload_url is empty; uploader disabled");
+        return;
+    }
+    config.timeoutSeconds = std::max(
+        1L, static_cast<long>(configManager_->getIntConfig("upload_timeout_s", 30)));
+    config.maxRetries = std::max(
+        0, configManager_->getIntConfig("upload_max_retries", 5));
+    config.scanPeriod = std::chrono::milliseconds(std::max(
+        100, configManager_->getIntConfig("upload_scan_period_ms", 2000)));
+    config.retryBackoff = std::chrono::milliseconds(std::max(
+        1000, configManager_->getIntConfig("upload_retry_backoff_ms", 15000)));
+
+    auto recordDirectory = configManager_->getConfig("record_directory");
+    const std::filesystem::path recordRoot(
+        recordDirectory.empty() ? "records" : recordDirectory);
+
+    uploadWorker_ = std::make_unique<UploadWorker>(recordRoot, config, get_logger());
+    uploadWorker_->start();
+    RCLCPP_INFO(get_logger(), "Event upload enabled: %s", config.url.c_str());
 }
 
 void DataCacheNode::registerEvents() {
