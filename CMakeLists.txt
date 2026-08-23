@@ -85,5 +85,32 @@ install(FILES tools/mock_server.py DESTINATION share/${PROJECT_NAME}/tools
   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
               WORLD_READ WORLD_EXECUTE)
 
+# ---- 单元测试 ----
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  macro(datacache_add_test name)
+    ament_add_gtest(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(${name} PRIVATE -Wall -Wextra -Wpedantic)
+    ament_target_dependencies(${name} rclcpp sensor_msgs)
+  endmacro()
+
+  datacache_add_test(test_config_manager test/test_config_manager.cpp src/config_manager.cpp)
+
+  datacache_add_test(test_data_buffer test/test_data_buffer.cpp)
+
+  datacache_add_test(test_pair_index test/test_pair_index.cpp)
+
+  datacache_add_test(test_approximate_synchronizer test/test_approximate_synchronizer.cpp)
+
+  datacache_add_test(test_record_io test/test_record_io.cpp)
+  target_include_directories(test_record_io PRIVATE ${ZSTD_INCLUDE_DIR} ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_record_io ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES})
+  ament_target_dependencies(test_record_io pcl_conversions)
+
+  datacache_add_test(test_upload_worker test/test_upload_worker.cpp)
+  target_link_libraries(test_upload_worker CURL::libcurl Threads::Threads)
+endif()
 
 ament_package()
