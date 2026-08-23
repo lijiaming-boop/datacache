@@ -1,6 +1,7 @@
 #pragma once
 
 #include "data.hpp"
+#include "disk_space_manager.hpp"
 #include "pair_index.hpp"
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -31,8 +33,10 @@
 
 class RawStorageWorker {
 public:
-    explicit RawStorageWorker(rclcpp::Logger logger, std::size_t maxPendingJobs = 20)
+    explicit RawStorageWorker(rclcpp::Logger logger, std::size_t maxPendingJobs = 20,
+                              std::shared_ptr<DiskSpaceManager> diskManager = nullptr)
         : logger_(std::move(logger)), maxPendingJobs_(maxPendingJobs),
+          diskManager_(std::move(diskManager)),
           worker_(&RawStorageWorker::run, this) {}
 
     RawStorageWorker(const RawStorageWorker&) = delete;
@@ -49,6 +53,8 @@ public:
         }
     }
 
+    // finalJob: 该事件目录的最后一批写入(post 窗口数据, 或无 post 窗口时的唯一
+    // 一批)。完成后写入 .complete 标记, 上传模块以此识别可回传的事件目录。
     bool enqueue(const std::filesystem::path& directory,
                  std::vector<SensorData> records,
                  bool recordCamera,
@@ -61,7 +67,8 @@ public:
                  int imageQuality,
                  std::string pointCloudFormat,
                  std::vector<PairRecord> pairs = {},
-                 bool reserved = false) {
+                 bool reserved = false,
+                 bool finalJob = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || (!reserved && jobs_.size() + reservedJobs_ >= maxPendingJobs_)) {
             if (reserved && reservedJobs_ > 0) {
@@ -75,7 +82,7 @@ public:
         jobs_.push_back(Job{directory, std::move(records), recordCamera, recordLidar,
                             compressionEnabled, compressionLevel, keepRaw,
                             conversionEnabled, std::move(imageFormat), imageQuality,
-                            std::move(pointCloudFormat), std::move(pairs)});
+                            std::move(pointCloudFormat), std::move(pairs), finalJob});
         if (reserved && reservedJobs_ > 0) {
             --reservedJobs_;
         }
@@ -113,6 +120,7 @@ private:
         int imageQuality;
         std::string pointCloudFormat;
         std::vector<PairRecord> pairs;
+        bool finalJob{false};
     };
 
     static rclcpp::Time timestampOf(const SensorData& data) {
@@ -243,6 +251,12 @@ private:
     }
 
     void writeJob(const Job& job) const {
+        if (diskManager_ && !diskManager_->prepareForWrite()) {
+            RCLCPP_ERROR(logger_, "Insufficient disk space; dropping %zu records destined for %s",
+                         job.records.size(), job.directory.string().c_str());
+            return;
+        }
+
         std::error_code error;
         std::filesystem::create_directories(job.directory, error);
         if (error) {
@@ -330,6 +344,23 @@ private:
                      << storedFileName << "," << (compressed ? "zstd" : "raw") << ","
                      << convertedFileName << "\n";
         }
+
+        if (job.finalJob) {
+            writeCompletionMarker(job.directory, job.records.size());
+        }
+
+        if (diskManager_) {
+            diskManager_->enforceRetention();
+        }
+    }
+
+    // .complete 是事件目录写完的信号(原子写入), UploadWorker 据此启动回传
+    static void writeCompletionMarker(const std::filesystem::path& directory,
+                                      std::size_t recordCount) {
+        std::ostringstream content;
+        content << "records=" << recordCount << "\n";
+        const auto text = content.str();
+        writeAtomically(directory / ".complete", text.data(), text.size());
     }
 
     static void writePairs(const std::filesystem::path& directory,
@@ -350,6 +381,7 @@ private:
 
     rclcpp::Logger logger_;
     std::size_t maxPendingJobs_;
+    std::shared_ptr<DiskSpaceManager> diskManager_;
     std::size_t reservedJobs_{0};
     std::deque<Job> jobs_;
     std::mutex mutex_;
