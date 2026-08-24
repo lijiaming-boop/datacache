@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -28,53 +29,51 @@
 namespace {
 
 void printUsage() {
-    std::cout <<
-        "用法: record_reader <event_dir> [选项]\n"
-        "  --verify            校验记录完整性(解压+反序列化+字段自洽), 失败退出码 2\n"
-        "  --export <dir>      导出为 png(相机) / pcd(雷达)\n"
-        "  --sensor <name>     只处理 camera 或 lidar\n"
-        "  --limit <n>         只处理前 n 条\n";
+    std::cout << "用法: record_reader <event_dir> [选项]\n"
+                 "  --verify            校验记录完整性(解压+反序列化+字段自洽), 失败退出码 2\n"
+                 "  --export <dir>      导出为 png(相机) / pcd(雷达)\n"
+                 "  --sensor <name>     只处理 camera 或 lidar\n"
+                 "  --limit <n>         只处理前 n 条\n";
 }
 
 bool toSizeT(const char* text, std::size_t& value) {
     try {
-        value = static_cast<std::size_t>(std::stoll(text));
+        std::size_t consumed = 0;
+        const auto parsed = std::stoll(text, &consumed);
+        if (parsed < 0 || consumed != std::strlen(text)) {
+            return false;
+        }
+        value = static_cast<std::size_t>(parsed);
         return true;
     } catch (const std::exception&) {
         return false;
     }
 }
 
-bool exportImage(const sensor_msgs::msg::Image& message,
-                 const std::filesystem::path& target) {
+bool exportImage(const sensor_msgs::msg::Image& message, const std::filesystem::path& target) {
     if (message.height == 0 || message.width == 0 || message.step == 0 ||
-        message.step * message.height > message.data.size()) {
+        static_cast<std::uint64_t>(message.step) * message.height > message.data.size()) {
         return false;
     }
     cv::Mat image;
     const auto& encoding = message.encoding;
     if (encoding == "bgr8") {
-        image = cv::Mat(static_cast<int>(message.height), static_cast<int>(message.width),
-                        CV_8UC3, const_cast<unsigned char*>(message.data.data()),
-                        message.step);
+        image = cv::Mat(static_cast<int>(message.height), static_cast<int>(message.width), CV_8UC3,
+                        const_cast<unsigned char*>(message.data.data()), message.step);
     } else if (encoding == "rgb8") {
-        const cv::Mat rgb(static_cast<int>(message.height),
-                          static_cast<int>(message.width), CV_8UC3,
-                          const_cast<unsigned char*>(message.data.data()), message.step);
+        const cv::Mat rgb(static_cast<int>(message.height), static_cast<int>(message.width),
+                          CV_8UC3, const_cast<unsigned char*>(message.data.data()), message.step);
         cv::cvtColor(rgb, image, cv::COLOR_RGB2BGR);
     } else if (encoding == "mono8") {
-        image = cv::Mat(static_cast<int>(message.height), static_cast<int>(message.width),
-                        CV_8UC1, const_cast<unsigned char*>(message.data.data()),
-                        message.step);
+        image = cv::Mat(static_cast<int>(message.height), static_cast<int>(message.width), CV_8UC1,
+                        const_cast<unsigned char*>(message.data.data()), message.step);
     } else if (encoding == "bgra8") {
-        const cv::Mat bgra(static_cast<int>(message.height),
-                           static_cast<int>(message.width), CV_8UC4,
-                           const_cast<unsigned char*>(message.data.data()), message.step);
+        const cv::Mat bgra(static_cast<int>(message.height), static_cast<int>(message.width),
+                           CV_8UC4, const_cast<unsigned char*>(message.data.data()), message.step);
         cv::cvtColor(bgra, image, cv::COLOR_BGRA2BGR);
     } else if (encoding == "rgba8") {
-        const cv::Mat rgba(static_cast<int>(message.height),
-                           static_cast<int>(message.width), CV_8UC4,
-                           const_cast<unsigned char*>(message.data.data()), message.step);
+        const cv::Mat rgba(static_cast<int>(message.height), static_cast<int>(message.width),
+                           CV_8UC4, const_cast<unsigned char*>(message.data.data()), message.step);
         cv::cvtColor(rgba, image, cv::COLOR_RGBA2BGR);
     } else {
         return false;
@@ -89,7 +88,7 @@ bool exportPointCloud(const sensor_msgs::msg::PointCloud2& message,
     return pcl::io::savePCDFileBinary(target.string(), cloud) == 0;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -134,8 +133,8 @@ int main(int argc, char** argv) {
     const auto entries = record_io::readManifest(eventDirectory);
     const auto pairs = record_io::readPairs(eventDirectory);
     std::cout << "事件目录: " << eventDirectory.string() << "\n";
-    std::cout << "manifest 记录数: " << entries.size() << ", pairs 记录数: "
-              << pairs.size() << "\n\n";
+    std::cout << "manifest 记录数: " << entries.size() << ", pairs 记录数: " << pairs.size()
+              << "\n\n";
     std::cout << "sensor    timestamp(ns)       encoding  size(bytes)  converted\n";
 
     std::size_t shown = 0;
@@ -157,10 +156,11 @@ int main(int argc, char** argv) {
 
     if (!pairs.empty()) {
         std::cout << "\npairs 摘要: ";
-        const auto matched = std::count_if(pairs.begin(), pairs.end(),
-            [](const record_io::PairEntry& pair) { return pair.status == "matched"; });
-        std::cout << matched << " matched, " << (pairs.size() - matched)
-                  << " single-sided\n";
+        const auto matched =
+            std::count_if(pairs.begin(), pairs.end(), [](const record_io::PairEntry& pair) {
+                return pair.status == "matched";
+            });
+        std::cout << matched << " matched, " << (pairs.size() - matched) << " single-sided\n";
     }
 
     int exitCode = 0;
@@ -216,8 +216,8 @@ int main(int argc, char** argv) {
         record_io::VerifyOptions verifyOptions;
         verifyOptions.sensor = options.sensor;
         const auto report = record_io::verifyEventDirectory(eventDirectory, verifyOptions);
-        std::cout << "\n校验结果: " << report.verifiedEntries << "/"
-                  << report.totalEntries << " 条通过";
+        std::cout << "\n校验结果: " << report.verifiedEntries << "/" << report.totalEntries
+                  << " 条通过";
         if (!report.warnings.empty()) {
             std::cout << " (" << report.warnings.size() << " 条警告)";
         }

@@ -27,6 +27,9 @@ ros2 launch datacache datacache.launch.py
 # 2. 触发一次"碰撞"事件（录制事件前 5 秒 + 事件后 10 秒）
 ros2 service call /request_trigger datacache/srv/EventTrigger "{event_name: 'collision'}"
 
+# 推荐的按键方式（另开终端）：c=碰撞，b=急刹，m=手动采集，q=退出
+ros2 run datacache keyboard_trigger_node
+
 # 3. 查看产物（目录名 = 事件名_触发时刻）
 ls records/collision_*/
 
@@ -42,6 +45,10 @@ Event 'collision' accepted for storage [camera: ok, lidar: ok]
 
 如果看到 `lidar: STALE 2.3s`，说明触发时雷达已 2.3 秒没有数据——这次录制里雷达
 片段可能不完整，需要排查设备。
+
+按键方式走统一事件总线：`keyboard_trigger_node` 发布 `/event_signal`，
+`event_router_node` 负责重复事件过滤和冷却，再调用缓存节点 RPC。按键终端会连续显示
+事件被受理、落盘完成和 RPC 上传完成；其他系统也可以订阅 `/event_status` 获取同样状态。
 
 > 没有真实相机？用合成视频源替代（30fps 移动图案，专为测试准备）：
 > `python3 test/test_camera_publisher.py`，或者只跑雷达链路也完全可以。
@@ -68,7 +75,7 @@ Event 'collision' accepted for storage [camera: ok, lidar: ok]
                                               ⑥寄出签收│          ⑦验货取用
                                                ┌────▼──────┐  ┌───────────────┐
                                                │UploadWorker│  │ record_reader  │
-                                               │ HTTP 回传  │  │ 校验/导出/统计  │
+                                               │ RPC 回传   │  │ 校验/导出/统计  │
                                                └───────────┘  └───────────────┘
 ```
 
@@ -145,9 +152,10 @@ Event 'collision' accepted for storage [camera: ok, lidar: ok]
 线程完成，绝不拖慢数据接收。每个事件目录长这样：
 
 ```
-records/collision_1700000000123456789/
+records/collision_0_1700000000123456789/
 ├── manifest.csv        # 清单：每条数据的文件名、编码、时间戳
 ├── pairs.csv           # 配对账本（阶段③的输出）
+├── manifest.sha256     # 全部数据文件的 SHA-256 完整性清单
 ├── camera_<时间戳>.bin.zst   # 原始数据，zstd 无损压缩
 ├── lidar_<时间戳>.bin.zst
 ├── images/camera_<时间戳>.jpg    # 即开即用的分析副本
@@ -162,6 +170,8 @@ records/collision_1700000000123456789/
 - 写文件的方式保证**不会留下半个文件**（先写临时名再原子改名），压缩数据自带
   校验和，磁盘静默损坏在回读时能被发现。
 - `.complete` 只在所有清单写完之后才出现——它出现即代表这个包裹内容完整。
+- 受理后先出现 `.pending`；任一 pre/post 批次或必需记录失败会转成 `.failed`。
+  进程重启时会自动对账崩溃遗留的 `.pending`。
 
 ## 9. 阶段⑥：磁盘管家 — DiskSpaceManager
 
@@ -181,25 +191,28 @@ records/collision_1700000000123456789/
 **功能：快递员——把写完的包裹自动寄给远端服务器。**
 
 后台每 2 秒扫描一次：发现带 `.complete` 且还没寄过的目录，就把整个目录通过
-HTTP 上传到 `upload_url`。行为规则：
+`datacache/srv/UploadStore` 服务分块发送到 `upload_service_name`。一次目录传输依次调用
+BEGIN（声明文件数/总字节数和 transfer_id）→ FILE_CHUNK（逐文件分块）→
+END（接收端校验文件数、字节数与 SHA-256 后确认）。行为规则：
 
 - 成功 → 写 `.uploaded` 标记（记录寄往哪、几个文件）；**本地数据保留不删**，
   磁盘回收永远是磁盘管家的职责；
 - 失败 → 自动重试，间隔指数拉长（15s 起，最多翻到 64 倍）；连续失败超过
-  `upload_max_retries`（默认 5 次）→ 写 `.upload_failed`，停止尝试等你处理。
+  `upload_max_retries`（默认 5 次）→ 写 `.upload_failed`，默认 30 分钟后重新排队。
 
 默认关闭。打开方法与配套的测试接收端：
 
 ```bash
-# 终端 A：起一个测试接收端（纯 Python 标准库，会打印收到的文件清单和 md5）
-python3 tools/mock_server.py 8080 upload_inbox
+# 终端 A：起包内测试接收节点（END 时验证 SHA-256 清单）
+ros2 run datacache upload_receiver_node upload_inbox /upload_store
 
 # 终端 B：配置文件里 upload_enabled=false 改为 true 后启动
 ros2 run datacache datacache_node --ros-args -p config_path:=config.txt
 ```
 
-> 注意：上传格式是本系统的 multipart 约定，生产环境的接收端需按
-> `tools/mock_server.py` 的解析逻辑对接。
+> 注意：发送端与接收端必须处于能够互相发现的 ROS2 DDS 域。跨网段/车云部署需要
+> DDS Router、VPN 或网关，并应按环境启用 DDS Security；服务名必须与
+> `upload_service_name` 一致。
 
 ## 11. 阶段⑦b：验货取用 — record_reader（回读工具）
 
@@ -207,14 +220,14 @@ ros2 run datacache datacache_node --ros-args -p config_path:=config.txt
 
 ```bash
 # 概要统计：多少条相机/雷达记录、各多大、什么编码
-ros2 run datacache record_reader records/collision_1700000000123456789
+ros2 run datacache record_reader records/collision_0_1700000000123456789
 
 # 完整性校验：文件存在 → 解压 → 反序列化 → 字段自洽，逐条过一遍
 # 任何一条损坏/缺失/清单撕裂 → 退出码 2（可直接用于脚本判断）
-ros2 run datacache record_reader records/collision_1700000000123456789 --verify
+ros2 run datacache record_reader records/collision_0_1700000000123456789 --verify
 
 # 导出为 png / pcd 文件到指定目录
-ros2 run datacache record_reader records/collision_1700000000123456789 --export out/
+ros2 run datacache record_reader records/collision_0_1700000000123456789 --export out/
 
 # 只看相机、只看前 10 条
 ros2 run datacache record_reader records/... --sensor camera --limit 10
@@ -242,7 +255,7 @@ ros2 run datacache record_reader records/... --sensor camera --limit 10
 | 同时保留未压缩原始 .bin | `keep_raw_after_compression=true` |
 | 调整导出图片质量 | `image_format`（jpg/png）、`image_quality`（1–100） |
 | 磁盘保护阈值与保留期 | `disk_min_free_mb`、`retention_days`、`retention_max_capacity_mb` |
-| 开启自动回传 | `upload_enabled=true` + `upload_url`；重试节奏 `upload_max_retries` / `upload_retry_backoff_ms` |
+| 开启自动回传 | `upload_enabled=true` + `upload_service_name`；重试节奏 `upload_max_retries` / `upload_retry_backoff_ms` |
 | 传感器断流的判定灵敏度 | `watchdog_stale_timeout_ms`（全局）、`watchdog_camera_stale_timeout_ms`（单传感器覆盖） |
 | 落盘位置 | `record_directory` |
 | 定时自动触发事件（测试用） | launch 参数 `event_interval:=30`（每 30 秒自动触发一次默认事件） |
@@ -263,12 +276,13 @@ ros2 run datacache record_reader records/... --sensor camera --limit 10
 
 **事件目录里没有 `.complete`？**
 说明写入没有正常完成：最常见是触发时磁盘剩余空间不足（写前检查拒绝），
-或 post 窗口数据入队时存储队列已满。这类目录不会被回传，可手动删除；
+或 post 窗口数据入队时存储队列已满。查看目录中的 `.failed` 可确认失败终态；
+崩溃遗留的 `.pending` 会在下次启动时自动转成 `.failed`。这类目录不会被回传；
 反复出现则调大 `max_pending_storage_jobs` 或清理磁盘。
 
 **出现 `.upload_failed` 怎么办？**
-重试已耗尽，属终态。确认接收端可达后，**删除该标记文件**即可——下个扫描周期
-（默认 2 秒）会重新尝试上传。
+一轮快速重试已耗尽。默认会在 `upload_failed_rescan_period_ms`（30 分钟）后自动
+重新排队；设为 0 才是永久终态，此时确认接收端可达后删除该标记即可手动重试。
 
 **`pairs.csv` 里大量 camera_only / lidar_only？**
 两路数据时间戳经常对不上：检查两传感器的时钟同步（NTP/PTP）、帧率是否悬殊、

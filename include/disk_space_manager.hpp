@@ -19,10 +19,11 @@
 class DiskSpaceManager {
 public:
     struct Policy {
-        std::uintmax_t minFreeBytes{0};      // 写前最低剩余空间，0 = 禁用
-        std::uintmax_t maxCapacityBytes{0};  // records 总量上限，0 = 禁用
-        int retentionDays{0};                // 事件目录保留天数，0 = 禁用
+        std::uintmax_t minFreeBytes{0};     // 写前最低剩余空间，0 = 禁用
+        std::uintmax_t maxCapacityBytes{0}; // records 总量上限，0 = 禁用
+        int retentionDays{0};               // 事件目录保留天数，0 = 禁用
         std::chrono::seconds cleanupInterval{60};
+        bool protectUnuploaded{false};
     };
 
     DiskSpaceManager(std::filesystem::path recordRoot, Policy policy, rclcpp::Logger logger)
@@ -81,10 +82,11 @@ public:
         auto eventDirs = collectEventDirs();
 
         if (ageEnabled) {
-            const auto cutoffNs = systemNowNs() - static_cast<std::int64_t>(policy_.retentionDays)
-                * 24LL * 3600LL * 1000000000LL;
+            const auto cutoffNs = systemNowNs() - static_cast<std::int64_t>(policy_.retentionDays) *
+                                                      24LL * 3600LL * 1000000000LL;
             // collectEventDirs 已按时间戳升序排序，越过阈值即可停止
-            for (auto it = eventDirs.begin(); it != eventDirs.end() && it->timestampNs < cutoffNs;) {
+            for (auto it = eventDirs.begin();
+                 it != eventDirs.end() && it->timestampNs < cutoffNs;) {
                 if (deleteDir(*it, "older than retention days")) {
                     it = eventDirs.erase(it);
                 } else {
@@ -122,13 +124,29 @@ private:
     std::vector<EventDir> collectEventDirs() const {
         std::vector<EventDir> dirs;
         std::error_code error;
-        for (std::filesystem::directory_iterator it(recordRoot_, error), end;
-             !error && it != end; it.increment(error)) {
+        for (std::filesystem::directory_iterator it(recordRoot_, error), end; !error && it != end;
+             it.increment(error)) {
             std::error_code entryError;
             if (!it->is_directory(entryError) || entryError) {
                 continue;
             }
-            EventDir dir{it->path(), parseEventTimestamp(it->path().filename().string()), 0};
+            const auto path = it->path();
+            // Never race retention against an event that is still being written or uploaded.
+            if (std::filesystem::exists(path / ".pending", entryError) ||
+                std::filesystem::exists(path / ".uploading", entryError) ||
+                std::filesystem::exists(path / ".uploading.tmp", entryError)) {
+                continue;
+            }
+            const bool complete = std::filesystem::exists(path / ".complete", entryError);
+            const bool failed = std::filesystem::exists(path / ".failed", entryError);
+            if (!complete && !failed) {
+                continue;
+            }
+            if (policy_.protectUnuploaded && complete &&
+                !std::filesystem::exists(path / ".uploaded", entryError)) {
+                continue;
+            }
+            EventDir dir{path, parseEventTimestamp(path.filename().string()), 0};
             if (dir.timestampNs >= 0) {
                 dirs.push_back(std::move(dir));
             }
@@ -143,8 +161,7 @@ private:
     // 下界 9 位（纳秒级 epoch）用于排除 <event>_123 之类的无关命名
     static std::int64_t parseEventTimestamp(const std::string& name) {
         const auto separator = name.find_last_of('_');
-        if (separator == std::string::npos || separator == 0 ||
-            separator + 1 >= name.size()) {
+        if (separator == std::string::npos || separator == 0 || separator + 1 >= name.size()) {
             return -1;
         }
         const auto digits = name.substr(separator + 1);
@@ -190,12 +207,20 @@ private:
 
     std::uintmax_t availableBytes() const {
         std::error_code error;
-        auto info = std::filesystem::space(recordRoot_, error);
-        if (error) {
-            info = std::filesystem::space(".", error);  // root 尚未创建时退回当前目录所在卷
+        auto probe = recordRoot_;
+        while (!probe.empty() && !std::filesystem::exists(probe, error)) {
+            error.clear();
+            const auto parent = probe.parent_path();
+            if (parent == probe) {
+                break;
+            }
+            probe = parent;
         }
+        const auto info = std::filesystem::space(probe.empty() ? recordRoot_ : probe, error);
         if (error) {
-            return std::numeric_limits<std::uintmax_t>::max();  // stat 失败按充足处理，不中断录制
+            RCLCPP_ERROR(logger_, "Cannot determine free disk space for %s: %s",
+                         recordRoot_.string().c_str(), error.message().c_str());
+            return 0; // Safety policy is enabled: unknown capacity must fail closed.
         }
         return info.available;
     }
@@ -208,8 +233,7 @@ private:
                         dir.path.string().c_str(), error.message().c_str());
             return false;
         }
-        RCLCPP_INFO(logger_, "Deleted event directory %s (%s)",
-                    dir.path.string().c_str(), reason);
+        RCLCPP_INFO(logger_, "Deleted event directory %s (%s)", dir.path.string().c_str(), reason);
         return true;
     }
 

@@ -2,8 +2,10 @@
 
 #include "data.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <deque>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -15,8 +17,9 @@
 // 队首弹出: 单条插入摊还 O(1), 不随缓存规模增长。
 class DataBuffer {
 public:
-    DataBuffer(std::size_t maxSize, rclcpp::Duration maxAge = rclcpp::Duration::from_seconds(0))
-        : maxSize_(maxSize), maxAge_(maxAge) {}
+    DataBuffer(std::size_t maxSize, rclcpp::Duration maxAge = rclcpp::Duration::from_seconds(0),
+               std::size_t maxBytesPerSensor = 0)
+        : maxSize_(maxSize), maxAge_(maxAge), maxBytesPerSensor_(maxBytesPerSensor) {}
 
     void addData(SensorData data) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -34,16 +37,29 @@ public:
             return;
         }
         auto& queue = queues_[data.type];
-        queue.push_back(std::move(data));
-        while (queue.size() > maxSize_) {
-            queue.pop_front();
+        auto& bytes = queueBytes_[data.type];
+        const auto addedBytes = payloadBytes(data);
+        if (queue.empty() || timestamp >= timestampOf(queue.back())) {
+            queue.push_back(std::move(data));
+        } else {
+            const auto position =
+                std::upper_bound(queue.begin(), queue.end(), timestamp,
+                                 [](const rclcpp::Time& value, const SensorData& candidate) {
+                                     return value < timestampOf(candidate);
+                                 });
+            queue.insert(position, std::move(data));
+        }
+        bytes = addedBytes > std::numeric_limits<std::size_t>::max() - bytes
+                    ? std::numeric_limits<std::size_t>::max()
+                    : bytes + addedBytes;
+        while (queue.size() > maxSize_ || (maxBytesPerSensor_ > 0 && bytes > maxBytesPerSensor_)) {
+            popFront(queue, bytes);
         }
         evictExpiredLocked();
     }
 
-    std::vector<SensorData> getDataWithinTimeRange(
-        const rclcpp::Time& start,
-        const rclcpp::Time& end) const {
+    std::vector<SensorData> getDataWithinTimeRange(const rclcpp::Time& start,
+                                                   const rclcpp::Time& end) const {
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<SensorData> result;
         for (const auto& entry : queues_) {
@@ -77,9 +93,8 @@ public:
     }
 
 private:
-    // 各队列按各自到达序排列, 队首即最老; 水位(全局最新时间戳 - maxAge)之前的
-    // 数据从队首连续弹出。少数乱序到达且落后超过年龄上限的帧在入队时已被拒绝,
-    // 因此队首弹出即可覆盖全部过期数据。
+    // Each per-sensor queue is timestamp ordered. Normal in-order arrivals stay O(1);
+    // occasional out-of-order frames take O(N) insertion so age/count eviction remains correct.
     void evictExpiredLocked() {
         if (maxAge_.nanoseconds() <= 0 || !hasLatestTimestamp_) {
             return;
@@ -87,8 +102,9 @@ private:
         const auto oldestAllowed = latestTimestamp_ - maxAge_;
         for (auto& entry : queues_) {
             auto& queue = entry.second;
+            auto& bytes = queueBytes_[entry.first];
             while (!queue.empty() && timestampOf(queue.front()) < oldestAllowed) {
-                queue.pop_front();
+                popFront(queue, bytes);
             }
         }
     }
@@ -97,10 +113,27 @@ private:
         return std::visit([](const auto& value) { return value.timestamp; }, data.data);
     }
 
+    static std::size_t payloadBytes(const SensorData& data) {
+        if (data.type == SensorType::CAMERA) {
+            const auto& image = std::get<CameraData>(data.data).image;
+            return image ? image->data.size() : 0;
+        }
+        const auto& cloud = std::get<LidarData>(data.data).cloud;
+        return cloud ? cloud->data.size() : 0;
+    }
+
+    static void popFront(std::deque<SensorData>& queue, std::size_t& bytes) {
+        const auto removed = payloadBytes(queue.front());
+        bytes = removed > bytes ? 0 : bytes - removed;
+        queue.pop_front();
+    }
+
     mutable std::mutex mutex_;
     std::map<SensorType, std::deque<SensorData>> queues_;
+    std::map<SensorType, std::size_t> queueBytes_;
     std::size_t maxSize_;
     rclcpp::Duration maxAge_;
+    std::size_t maxBytesPerSensor_{0};
     rclcpp::Time latestTimestamp_;
     bool hasLatestTimestamp_{false};
 };

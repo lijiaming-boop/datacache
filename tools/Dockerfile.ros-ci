@@ -1,0 +1,25 @@
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN sed -i \
+    's|http://archive.ubuntu.com/ubuntu|https://mirrors.edge.kernel.org/ubuntu|g' \
+    /etc/apt/sources.list.d/ubuntu.sources
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get -o Acquire::Retries=10 update \
+    && apt-get -o Acquire::Retries=10 install -y --fix-missing --no-install-recommends \
+        libpcl-dev \
+        libssl-dev \
+        libzstd-dev \
+        procps \
+        python3-colcon-common-extensions \
+        ros-jazzy-ament-cmake-gtest \
+        ros-jazzy-ament-cmake-pytest \
+        ros-jazzy-cv-bridge \
+        ros-jazzy-pcl-conversions \
+        ros-jazzy-rclpy \
+        ros-jazzy-rosidl-default-generators
+
+WORKDIR /ws

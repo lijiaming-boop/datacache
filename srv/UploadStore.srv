@@ -1,0 +1,20 @@
+# 事件目录回传的 RPC 接口(取代原 HTTP multipart 上传)。
+# 调用方按 BEGIN -> FILE_CHUNK*(单文件可分块) -> END 的顺序传输一个事件目录,
+# 接收端在 BEGIN 时重建该事件的暂存目录, 因此整段重传天然幂等；END 校验
+# 通过后才用暂存目录替换最终收件目录。
+# 响应的 received_bytes 在 END 时返回接收端实际校验通过的目录字节数。
+uint8 BEGIN=0
+uint8 FILE_CHUNK=1
+uint8 END=2
+string event_name      # 安全目录名 [A-Za-z0-9][A-Za-z0-9_.-]*, 如 collision_<ns时间戳>
+string transfer_id     # 本次事务唯一标识；隔离同名事件的并发发送方
+uint8 opcode           # BEGIN / FILE_CHUNK / END
+string file_path       # FILE_CHUNK: 无 . 或 .. 段的 POSIX 相对路径, 其他操作为空
+uint64 offset          # FILE_CHUNK: 本块在文件内的起始字节偏移
+uint64 total_bytes     # BEGIN: 整目录预计字节数; FILE_CHUNK: 该文件总大小; END: 0
+uint32 file_count      # BEGIN: 整目录预计文件数; 其他为 0
+uint8[<=1048576] data  # FILE_CHUNK: 分块内容(发送端限制在 1MiB 内)
+---
+bool success
+string message
+uint64 received_bytes  # END: 接收端校验通过的目录字节数; 其他操作为 0

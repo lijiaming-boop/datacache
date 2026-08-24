@@ -33,8 +33,8 @@ public:
         const auto period = std::chrono::milliseconds(1000 / fps);
         timer_ = create_wall_timer(period, [this]() { captureAndPublish(); });
 
-        RCLCPP_INFO(get_logger(), "CameraNode started [device=%d, fps=%d, %dx%d]",
-                    device, fps, width, height);
+        RCLCPP_INFO(get_logger(), "CameraNode started [device=%d, fps=%d, %dx%d]", device, fps,
+                    width, height);
     }
 
     ~CameraNode() override {
@@ -51,8 +51,7 @@ private:
             return;
         }
 
-        auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame)
-                       .toImageMsg();
+        auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame).toImageMsg();
         msg->header.stamp = now();
         msg->header.frame_id = "camera_frame";
 

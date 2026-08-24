@@ -1,0 +1,12 @@
+# 匹配仓库既有风格：4 空格缩进、100 列、右对齐指针/引用、不重排 include 顺序。
+# 只使用各版本 clang-format 均稳定的经典选项，CI（clang-format-18）与本地
+# （clang-format-22）行为一致。
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -4
+PointerAlignment: Left
+DerivePointerAlignment: false
+SortIncludes: Never
+IncludeBlocks: Preserve

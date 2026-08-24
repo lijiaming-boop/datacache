@@ -1,5 +1,9 @@
 # Event name to trigger, for example: collision or hard_brake
 string event_name
+string trigger_id
+string source
 ---
 bool success
 string message
+string capture_id
+string record_directory

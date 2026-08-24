@@ -22,16 +22,15 @@ namespace {
 std::filesystem::path makeTempDir(const std::string& tag) {
     static std::uint64_t counter = 0;
     const auto dir = std::filesystem::temp_directory_path() /
-        ("datacache_record_io_" + tag + "_" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-         "_" + std::to_string(++counter));
+                     ("datacache_record_io_" + tag + "_" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                      "_" + std::to_string(++counter));
     std::filesystem::create_directories(dir);
     return dir;
 }
 
 bool waitFor(const std::function<bool()>& predicate, int timeoutMs) {
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < deadline) {
         if (predicate()) {
             return true;
@@ -72,12 +71,11 @@ sensor_msgs::msg::PointCloud2::SharedPtr makeCloud(std::int64_t nanoseconds) {
     stampHeader(cloud->header, nanoseconds);
     cloud->height = 1;
     cloud->width = 4;
-    cloud->point_step = 12;  // x/y/z float32
+    cloud->point_step = 12; // x/y/z float32
     for (const char* field : {"x", "y", "z"}) {
         sensor_msgs::msg::PointField pointField;
         pointField.name = field;
-        pointField.offset = static_cast<std::uint32_t>(
-            (field[0] - 'x') * 4);
+        pointField.offset = static_cast<std::uint32_t>((field[0] - 'x') * 4);
         pointField.datatype = sensor_msgs::msg::PointField::FLOAT32;
         pointField.count = 1;
         cloud->fields.push_back(pointField);
@@ -99,8 +97,7 @@ struct Fixture {
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
 
     Fixture()
-        : root(makeTempDir("fixture")),
-          eventDir(root / "collision_1700000000000000000"),
+        : root(makeTempDir("fixture")), eventDir(root / "collision_1700000000000000000"),
           image(makeImage(1'700'000'000'000'000'000LL)),
           cloud(makeCloud(1'700'000'000'010'000'000LL)) {}
 
@@ -114,19 +111,15 @@ struct Fixture {
         RawStorageWorker worker(rclcpp::get_logger("test"), 4);
         std::vector<SensorData> records;
         records.push_back(
-            SensorData{SensorType::CAMERA,
-                       CameraData{rclcpp::Time(image->header.stamp), image}});
+            SensorData{SensorType::CAMERA, CameraData{rclcpp::Time(image->header.stamp), image}});
         records.push_back(
-            SensorData{SensorType::LIDAR,
-                       LidarData{rclcpp::Time(cloud->header.stamp), cloud}});
-        ASSERT_TRUE(worker.enqueue(eventDir, std::move(records),
-                                   true, true,
-                                   true /*compression*/, 3, false,
-                                   false /*conversion*/,
-                                   "jpg", 90, "pcd", pairs, false, true));
-        ASSERT_TRUE(waitFor([this] {
-            return std::filesystem::exists(eventDir / ".complete");
-        }, 5000)) << "storage worker did not finish in time";
+            SensorData{SensorType::LIDAR, LidarData{rclcpp::Time(cloud->header.stamp), cloud}});
+        ASSERT_TRUE(worker.enqueue(eventDir, std::move(records), true, true, true /*compression*/,
+                                   3, false, false /*conversion*/, "jpg", 90, "pcd", pairs, false,
+                                   true));
+        ASSERT_TRUE(
+            waitFor([this] { return std::filesystem::exists(eventDir / ".complete"); }, 5000))
+            << "storage worker did not finish in time";
     }
 };
 
@@ -137,8 +130,8 @@ TEST(RecordIoTest, WriteReadRoundtrip) {
                      rclcpp::Time(fixture.cloud->header.stamp),
                      rclcpp::Duration::from_nanoseconds(10'000'000));
     // 查询边界与账本时间同为 RCL_ROS_TIME(来自 header.stamp 的默认时间源)
-    fixture.write(index.getDataWithinTimeRange(
-        rosTimeAt(0), rosTimeAt(2'000'000'000'000'000'000LL)));
+    fixture.write(
+        index.getDataWithinTimeRange(rosTimeAt(0), rosTimeAt(2'000'000'000'000'000'000LL)));
 
     // manifest 结构
     const auto entries = record_io::readManifest(fixture.eventDir);
@@ -157,15 +150,13 @@ TEST(RecordIoTest, WriteReadRoundtrip) {
 
     // 完整性校验通过
     const auto report = record_io::verifyEventDirectory(fixture.eventDir);
-    EXPECT_TRUE(report.ok())
-        << (report.problems.empty() ? "" : report.problems[0]);
+    EXPECT_TRUE(report.ok()) << (report.problems.empty() ? "" : report.problems[0]);
     EXPECT_EQ(report.verifiedEntries, 2U);
 
     // 相机字节级还原
     std::vector<std::uint8_t> bytes;
     std::string error;
-    ASSERT_TRUE(record_io::loadRecordBytes(fixture.eventDir, entries[0], bytes, error))
-        << error;
+    ASSERT_TRUE(record_io::loadRecordBytes(fixture.eventDir, entries[0], bytes, error)) << error;
     sensor_msgs::msg::Image restored;
     ASSERT_TRUE(record_io::deserializeMessage(bytes, restored, error)) << error;
     EXPECT_EQ(restored.width, fixture.image->width);
@@ -174,8 +165,7 @@ TEST(RecordIoTest, WriteReadRoundtrip) {
     EXPECT_EQ(restored.data, fixture.image->data);
 
     // 雷达字节级还原
-    ASSERT_TRUE(record_io::loadRecordBytes(fixture.eventDir, entries[1], bytes, error))
-        << error;
+    ASSERT_TRUE(record_io::loadRecordBytes(fixture.eventDir, entries[1], bytes, error)) << error;
     sensor_msgs::msg::PointCloud2 restoredCloud;
     ASSERT_TRUE(record_io::deserializeMessage(bytes, restoredCloud, error)) << error;
     EXPECT_EQ(restoredCloud.width, fixture.cloud->width);
@@ -191,8 +181,7 @@ TEST(RecordIoTest, VerifyDetectsCorruption) {
 
     // 破坏一条压缩记录
     const auto entries = record_io::readManifest(fixture.eventDir);
-    std::ofstream corrupt(fixture.eventDir / entries[0].file,
-                          std::ios::binary | std::ios::trunc);
+    std::ofstream corrupt(fixture.eventDir / entries[0].file, std::ios::binary | std::ios::trunc);
     corrupt << "not a zstd frame at all";
     corrupt.close();
 
@@ -200,7 +189,7 @@ TEST(RecordIoTest, VerifyDetectsCorruption) {
     EXPECT_FALSE(report.ok());
     EXPECT_EQ(report.failedEntries, 1U);
     EXPECT_EQ(report.verifiedEntries, 1U);
-    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_GE(report.problems.size(), 2U); // SHA-256 mismatch + record decode failure
 }
 
 TEST(RecordIoTest, VerifyHandlesMissingManifestAndSensorFilter) {
@@ -232,7 +221,7 @@ TEST(RecordIoTest, TornManifestLinesAreReportedNotThrown) {
     // 且 --verify 语义下(verifyEventDirectory)整体判定为失败
     {
         std::ofstream append(fixture.eventDir / "manifest.csv", std::ios::app);
-        append << "camera,170000000";  // 撕裂: 字段不足
+        append << "camera,170000000"; // 撕裂: 字段不足
         append.flush();
     }
     std::vector<std::string> problems;
@@ -252,7 +241,7 @@ TEST(RecordIoTest, TornPairsLinesAreReportedNotThrown) {
         std::ofstream output(dir / "pairs.csv", std::ios::trunc);
         output << "pair_id,status,camera_timestamp,lidar_timestamp,time_diff_ns,reason\n";
         output << "1,matched,1700000000000000000,1700000000100000000,10000000,\n";
-        output << "2,matched,not-a-number,,,";  // 撕裂: 时间戳字段损坏
+        output << "2,matched,not-a-number,,,"; // 撕裂: 时间戳字段损坏
         output.flush();
     }
     std::vector<std::string> problems;
@@ -265,4 +254,4 @@ TEST(RecordIoTest, TornPairsLinesAreReportedNotThrown) {
     std::filesystem::remove_all(dir, error);
 }
 
-}  // namespace
+} // namespace

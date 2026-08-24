@@ -12,19 +12,34 @@ project(datacache LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ASan/UBSan 构建（CI sanitizer 任务与本地内存问题排查）:
+#   colcon build --cmake-args -DDATACACHE_SANITIZERS=ON
+# UBSan 配 -fno-sanitize-recover 让未定义行为直接中止测试而不是仅打印
+option(DATACACHE_SANITIZERS "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(DATACACHE_SANITIZERS)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer
+                      -fno-sanitize-recover=all -g)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(Threads REQUIRED)
 find_path(ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
 find_library(ZSTD_LIBRARY NAMES zstd REQUIRED)
-find_package(CURL REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/EventSignal.msg"
+  "msg/EventStatus.msg"
   "srv/EventTrigger.srv"
+  "srv/UploadStore.srv"
+  DEPENDENCIES builtin_interfaces
 )
 
 # 必须在 pcl_conversions/PCL 之前查找，且显式要求 C、CXX 两种绑定
@@ -33,14 +48,17 @@ find_package(MPI REQUIRED COMPONENTS C CXX)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io)
 
-# 5 个可执行文件, 目标名与 launch 文件里的 executable 一致(record_reader 为 CLI 工具)
+# 节点与 CLI 可执行文件，目标名与 launch 里的 executable 一致
 add_executable(datacache_node src/main.cc src/datacache_node.cpp src/config_manager.cpp)
 add_executable(camera_node src/camera_node.cpp)
 add_executable(lidar_sim_node src/lidar_sim_node.cc)
 add_executable(event_trigger_node src/event_trigger_node.cc)
+add_executable(event_router_node src/event_router_node.cc)
+add_executable(keyboard_trigger_node src/keyboard_trigger_node.cc)
 add_executable(record_reader src/record_reader.cpp)
 
-foreach(target datacache_node camera_node lidar_sim_node event_trigger_node record_reader)
+foreach(target datacache_node camera_node lidar_sim_node event_trigger_node event_router_node
+               keyboard_trigger_node record_reader)
   target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
   ament_target_dependencies(${target}
@@ -49,14 +67,15 @@ endforeach()
 
 rosidl_target_interfaces(datacache_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(event_trigger_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(event_router_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(keyboard_trigger_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # 各节点额外的库依赖
 target_link_libraries(camera_node ${OpenCV_LIBS})
 target_link_libraries(camera_node cv_bridge::cv_bridge)
-target_link_libraries(datacache_node Threads::Threads)
+target_link_libraries(datacache_node Threads::Threads OpenSSL::Crypto)
 target_include_directories(datacache_node PRIVATE ${ZSTD_INCLUDE_DIR})
 target_link_libraries(datacache_node ${ZSTD_LIBRARY})
-target_link_libraries(datacache_node CURL::libcurl)
 target_link_libraries(datacache_node ${OpenCV_LIBS})
 target_include_directories(datacache_node PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(datacache_node ${PCL_LIBRARIES})
@@ -64,7 +83,7 @@ ament_target_dependencies(datacache_node pcl_conversions)
 
 # record_reader: zstd 解压 + OpenCV/PCL 导出
 target_include_directories(record_reader PRIVATE ${ZSTD_INCLUDE_DIR})
-target_link_libraries(record_reader ${ZSTD_LIBRARY} ${OpenCV_LIBS})
+target_link_libraries(record_reader ${ZSTD_LIBRARY} ${OpenCV_LIBS} OpenSSL::Crypto)
 target_include_directories(record_reader PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(record_reader ${PCL_LIBRARIES})
 ament_target_dependencies(record_reader pcl_conversions)
@@ -74,20 +93,22 @@ ament_target_dependencies(lidar_sim_node pcl_conversions)
 target_include_directories(lidar_sim_node PRIVATE ${PCL_INCLUDE_DIRS})
 target_link_libraries(lidar_sim_node ${PCL_LIBRARIES})
 
-install(TARGETS datacache_node camera_node lidar_sim_node event_trigger_node record_reader
+install(TARGETS datacache_node camera_node lidar_sim_node event_trigger_node event_router_node
+                keyboard_trigger_node record_reader
   DESTINATION lib/${PROJECT_NAME})
 
 # launch / config / pcd 装进 install 空间，运行时才能找到
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(FILES config.txt DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY pcd DESTINATION share/${PROJECT_NAME})
-install(FILES tools/mock_server.py DESTINATION share/${PROJECT_NAME}/tools
-  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
-              WORLD_READ WORLD_EXECUTE)
+install(PROGRAMS tools/receiver_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME upload_receiver_node)
 
 # ---- 单元测试 ----
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
 
   macro(datacache_add_test name)
     ament_add_gtest(${name} ${ARGN})
@@ -98,6 +119,10 @@ if(BUILD_TESTING)
 
   datacache_add_test(test_config_manager test/test_config_manager.cpp src/config_manager.cpp)
 
+  datacache_add_test(test_event_trigger_policy test/test_event_trigger_policy.cpp)
+  datacache_add_test(test_event_router_policy test/test_event_router_policy.cpp)
+  datacache_add_test(test_event_state test/test_event_state.cpp)
+
   datacache_add_test(test_data_buffer test/test_data_buffer.cpp)
 
   datacache_add_test(test_pair_index test/test_pair_index.cpp)
@@ -106,7 +131,7 @@ if(BUILD_TESTING)
 
   datacache_add_test(test_record_io test/test_record_io.cpp)
   target_include_directories(test_record_io PRIVATE ${ZSTD_INCLUDE_DIR} ${PCL_INCLUDE_DIRS})
-  target_link_libraries(test_record_io ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES})
+  target_link_libraries(test_record_io ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES} OpenSSL::Crypto)
   ament_target_dependencies(test_record_io pcl_conversions)
 
   datacache_add_test(test_disk_space_manager test/test_disk_space_manager.cpp)
@@ -114,11 +139,14 @@ if(BUILD_TESTING)
   datacache_add_test(test_event_monitor test/test_event_monitor.cpp src/config_manager.cpp)
   target_include_directories(test_event_monitor PRIVATE ${ZSTD_INCLUDE_DIR} ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_event_monitor
-    ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES} Threads::Threads)
+    ${ZSTD_LIBRARY} ${OpenCV_LIBS} ${PCL_LIBRARIES} Threads::Threads OpenSSL::Crypto)
   ament_target_dependencies(test_event_monitor pcl_conversions)
 
   datacache_add_test(test_upload_worker test/test_upload_worker.cpp)
-  target_link_libraries(test_upload_worker CURL::libcurl Threads::Threads)
+  rosidl_target_interfaces(test_upload_worker ${PROJECT_NAME} "rosidl_typesupport_cpp")
+  target_link_libraries(test_upload_worker Threads::Threads)
+
+  ament_add_pytest_test(test_receiver_node test/test_receiver_node.py TIMEOUT 30)
 endif()
 
 ament_package()

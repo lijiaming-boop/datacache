@@ -61,12 +61,11 @@ TEST(PairIndexTest, TrimKeepsNewestHundredThousand) {
     for (int i = 0; i < 100'050; ++i) {
         index.addSingle("camera", timeAt(i), "bulk");
     }
-    const auto records =
-        index.getDataWithinTimeRange(timeAt(0), timeAt(1'000'000));
+    const auto records = index.getDataWithinTimeRange(timeAt(0), timeAt(1'000'000));
     ASSERT_EQ(records.size(), 100'000U);
     // 淘汰最旧: 剩余 50..100049
     EXPECT_EQ(records.front().cameraTimestamp, timeAt(50));
     EXPECT_EQ(records.back().cameraTimestamp, timeAt(100'049));
 }
 
-}  // namespace
+} // namespace

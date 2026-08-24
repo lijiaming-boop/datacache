@@ -54,8 +54,8 @@ public:
                 }
                 state.stale = stale;
                 const auto elapsed = stale ? now - state.lastReceive : now - state.staleSince;
-                transitions.push_back(Transition{name, stale,
-                    std::chrono::duration_cast<std::chrono::milliseconds>(elapsed)});
+                transitions.push_back(Transition{
+                    name, stale, std::chrono::duration_cast<std::chrono::milliseconds>(elapsed)});
                 if (stale) {
                     state.staleSince = now;
                 }
@@ -87,8 +87,8 @@ public:
             if (!state.stale) {
                 description += "ok";
             } else {
-                const auto silent = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - state.lastReceive);
+                const auto silent =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - state.lastReceive);
                 description += "STALE " + formatSeconds(silent);
             }
         }
