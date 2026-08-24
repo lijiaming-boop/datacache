@@ -1,12 +1,14 @@
 # Data cache capacity
 buffer_size=1000
 buffer_duration_seconds=30
+buffer_max_mb=1024
 
 # Approximate camera/lidar timestamp matching
 sync_enabled=true
 sync_queue_size=100
 sync_tolerance_ms=20
 sync_required_for_recording=false
+trigger_dedupe_ttl_ms=60000
 
 # Maximum number of event storage jobs waiting for the background worker
 max_pending_storage_jobs=20
@@ -44,33 +46,42 @@ retention_days=30
 retention_max_capacity_mb=10240
 disk_cleanup_interval_seconds=60
 
-# Event upload/backflow: POST completed event directories (marked .complete by
-# the storage worker) to upload_url via HTTP multipart. Successful uploads are
-# marked .uploaded; uploads still failing after upload_max_retries retries are
-# marked .upload_failed. Local data is kept; disk reclamation stays with the
-# retention policies above. Set upload_url to an empty string to disable.
+# Event upload/backflow: transfer completed event directories (marked
+# .complete by the storage worker) to the receiver's ROS2 service
+# (datacache/srv/UploadStore: BEGIN -> FILE_CHUNK* -> END) over DDS.
+# Successful uploads are marked .uploaded; uploads still failing after
+# upload_max_retries retries are marked .upload_failed. Local data is kept;
+# disk reclamation stays with the retention policies above.
 upload_enabled=false
-upload_url=http://127.0.0.1:8080/upload
+upload_service_name=/upload_store
 upload_scan_period_ms=2000
 upload_timeout_s=30
 upload_max_retries=5
 upload_retry_backoff_ms=15000
+upload_lease_timeout_s=300
+upload_failed_rescan_period_ms=1800000
 
 # Event registration
+event_names=collision,hard_brake,manual_capture
 enable_collision_event=true
 enable_hard_brake_event=true
+enable_manual_capture_event=true
 
 # Event-specific capture windows (seconds)
 event_collision_pre_time=5
 event_collision_post_time=10
 event_hard_brake_pre_time=3
 event_hard_brake_post_time=6
+event_manual_capture_pre_time=5
+event_manual_capture_post_time=5
 
 # Event-specific sensor selection
 event_collision_record_camera=true
 event_collision_record_lidar=true
 event_hard_brake_record_camera=true
 event_hard_brake_record_lidar=false
+event_manual_capture_record_camera=true
+event_manual_capture_record_lidar=true
 
 # Global fallback for events without an event-specific setting
 event_pre_time=5

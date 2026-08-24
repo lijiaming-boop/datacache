@@ -38,9 +38,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
               ros-jazzy-cv-bridge \
               ros-jazzy-pcl-conversions \
+              ros-jazzy-rclpy \
               ros-jazzy-rosidl-default-generators \
-              ros-jazzy-ament-cmake-gtest \
-              libpcl-dev libzstd-dev libcurl4-openssl-dev \
+              ros-jazzy-ament-cmake-gtest ros-jazzy-ament-cmake-pytest \
+              libpcl-dev libzstd-dev libssl-dev \
               python3-colcon-common-extensions
       - name: Build
         shell: bash
@@ -53,6 +54,12 @@ jobs:
           source /opt/ros/jazzy/setup.bash
           colcon test --event-handlers console_direct+
           colcon test-result --verbose
+      - name: End-to-end smoke test
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          bash tools/smoke_test.sh
 
   # 同一套测试在 ASan + UBSan 下再跑一遍, 覆盖并发模块的内存/未定义行为
   sanitizers:
@@ -69,9 +76,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
               ros-jazzy-cv-bridge \
               ros-jazzy-pcl-conversions \
+              ros-jazzy-rclpy \
               ros-jazzy-rosidl-default-generators \
-              ros-jazzy-ament-cmake-gtest \
-              libpcl-dev libzstd-dev libcurl4-openssl-dev \
+              ros-jazzy-ament-cmake-gtest ros-jazzy-ament-cmake-pytest \
+              libpcl-dev libzstd-dev libssl-dev \
               python3-colcon-common-extensions
       - name: Build with sanitizers
         shell: bash

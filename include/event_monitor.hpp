@@ -3,6 +3,7 @@
 #include "config_manager.hpp"
 #include "databuffer.hpp"
 #include "disk_space_manager.hpp"
+#include "event_state.hpp"
 #include "raw_storage_worker.hpp"
 #include "pair_index.hpp"
 
@@ -28,6 +29,12 @@
 
 class EventMonitor {
 public:
+    struct CaptureResult {
+        bool accepted{false};
+        std::filesystem::path directory;
+        std::string message;
+    };
+
     EventMonitor(std::shared_ptr<DataBuffer> dataBuffer,
                  std::shared_ptr<ConfigManager> configManager, std::shared_ptr<PairIndex> pairIndex,
                  rclcpp::Logger logger, std::shared_ptr<rclcpp::Clock> clock, rclcpp::Node* node,
@@ -44,8 +51,8 @@ public:
               diskManager_)),
           maxActiveCaptures_(static_cast<std::size_t>(
               std::max(1, configManager_->getIntConfig("max_active_event_captures", 16)))),
-          sensorStallGrace_(rclcpp::Duration::from_seconds(
-              std::max(0, configManager_->getIntConfig("sensor_stall_grace_ms", 5000)) / 1000.0)),
+          sensorStallGrace_(std::chrono::milliseconds(
+              std::max(0, configManager_->getIntConfig("sensor_stall_grace_ms", 5000)))),
           schedulerTimer_(node_->create_wall_timer(
               std::chrono::milliseconds(
                   std::max(1, configManager_->getIntConfig("event_scheduler_period_ms", 50))),
@@ -71,7 +78,15 @@ public:
         return event->second();
     }
 
+    bool hasEvent(const std::string& eventName) const {
+        return eventCallbacks_.find(eventName) != eventCallbacks_.end();
+    }
+
     bool recordDataAroundEvent(const std::string& eventName) {
+        return recordDataAroundEventDetailed(eventName).accepted;
+    }
+
+    CaptureResult recordDataAroundEventDetailed(const std::string& eventName) {
         if (flushPendingPairs_)
             flushPendingPairs_();
         const auto preSeconds =
@@ -79,6 +94,9 @@ public:
         const auto postSeconds =
             std::max(0, getEventIntConfig(eventName, "post_time", "event_post_time", 5));
         const auto wallNow = clock_->now();
+        const auto systemNowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
         // Window bounds must be expressed in the sensor time domain because
         // DataBuffer and PairIndex are keyed by header.stamp; node-clock bounds
         // would slice the wrong data whenever sensor and node clocks skew.
@@ -93,12 +111,11 @@ public:
         RCLCPP_INFO(logger_, "Recording event '%s' [pre=%ds, post=%ds] sensor_time=%lld",
                     eventName.c_str(), preSeconds, postSeconds,
                     static_cast<long long>(eventTime.nanoseconds()));
-        const auto outputDirectory = configManager_->getConfig("record_directory");
-        // Directory names stay on the wall clock: two events can share the same
-        // newest sensor frame, and the wall timestamp keeps names unique.
-        const auto eventDirectory =
-            std::filesystem::path(outputDirectory.empty() ? "records" : outputDirectory) /
-            (eventName + "_" + std::to_string(wallNow.nanoseconds()));
+        // The final numeric component is system-clock epoch time, which is also
+        // the time domain used by retention. The sequence keeps same-tick events unique.
+        const auto eventDirectory = loadRecordRoot(configManager_) /
+                                    (eventName + "_" + std::to_string(nextCaptureId_.fetch_add(1)) +
+                                     "_" + std::to_string(systemNowNs));
 
         auto preWindowPairs = pairIndex_->getDataWithinTimeRange(startTime, eventTime);
         if (requireSyncedData_) {
@@ -110,22 +127,34 @@ public:
                              "Rejecting event '%s': no synchronized camera/lidar pairs "
                              "in the pre-event window",
                              eventName.c_str());
-                return false;
+                return {false, eventDirectory, "no synchronized data in pre-event window"};
             }
         }
 
         if (postSeconds <= 0) {
-            return enqueueRecords(eventDirectory, eventName,
-                                  dataBuffer_->getDataWithinTimeRange(startTime, eventTime),
-                                  std::move(preWindowPairs), false, true);
+            if (!storageWorker_->reserve()) {
+                return {false, eventDirectory, "storage queue unavailable"};
+            }
+            if (!event_state::begin(eventDirectory, eventName, systemNowNs)) {
+                storageWorker_->releaseReservation();
+                return {false, eventDirectory, "cannot create pending event state"};
+            }
+            const auto accepted =
+                enqueueRecords(eventDirectory, eventName,
+                               dataBuffer_->getDataWithinTimeRange(startTime, eventTime),
+                               std::move(preWindowPairs), true, true);
+            if (!accepted) {
+                event_state::fail(eventDirectory, "storage_queue_unavailable");
+            }
+            return {accepted, eventDirectory,
+                    accepted ? "accepted for storage" : "storage queue unavailable"};
         }
 
-        EventCaptureTask task{eventName + "_" + std::to_string(wallNow.nanoseconds()) + "_" +
-                                  std::to_string(nextCaptureId_.fetch_add(1)),
+        EventCaptureTask task{eventDirectory.filename().string(),
                               eventName,
                               eventTime,
                               eventTime + rclcpp::Duration::from_seconds(postSeconds),
-                              wallNow + rclcpp::Duration::from_seconds(postSeconds) +
+                              std::chrono::steady_clock::now() + std::chrono::seconds(postSeconds) +
                                   sensorStallGrace_,
                               eventDirectory};
         const auto taskId = task.taskId;
@@ -133,7 +162,7 @@ public:
             RCLCPP_ERROR(logger_,
                          "Cannot accept event '%s': storage queue has no room for post-event data",
                          eventName.c_str());
-            return false;
+            return {false, eventDirectory, "storage queue unavailable"};
         }
         {
             std::lock_guard<std::mutex> lock(captureMutex_);
@@ -142,7 +171,11 @@ public:
                              "Cannot accept event '%s': maximum active event captures reached",
                              eventName.c_str());
                 storageWorker_->releaseReservation();
-                return false;
+                return {false, eventDirectory, "maximum active captures reached"};
+            }
+            if (!event_state::begin(eventDirectory, eventName, systemNowNs)) {
+                storageWorker_->releaseReservation();
+                return {false, eventDirectory, "cannot create pending event state"};
             }
             activeCaptures_.emplace(task.taskId, std::move(task));
         }
@@ -154,17 +187,19 @@ public:
             std::lock_guard<std::mutex> lock(captureMutex_);
             activeCaptures_.erase(taskId);
             storageWorker_->releaseReservation();
+            event_state::fail(eventDirectory, "pre_event_queue_unavailable");
             RCLCPP_ERROR(logger_,
                          "Cannot accept event '%s': pre-event storage queue is unavailable",
                          eventName.c_str());
         }
-        return accepted;
+        return {accepted, eventDirectory,
+                accepted ? "accepted for storage" : "pre-event storage queue unavailable"};
     }
 
     // 检查并收割到期的 post 窗口捕获任务。正常由 schedulerTimer_ 周期调用;
     // 公开为 public 供单元测试直接驱动(不依赖定时器回调被 spin 到)。
     void processExpiredCaptures() {
-        const auto wallNow = clock_->now();
+        const auto steadyNow = std::chrono::steady_clock::now();
         const auto sensorNow = dataBuffer_->latestSensorTimestamp();
         std::vector<EventCaptureTask> expired;
         {
@@ -174,7 +209,7 @@ public:
                 // fallback so a stalled sensor cannot pin captures in memory.
                 const bool postWindowComplete =
                     sensorNow.has_value() && *sensorNow >= it->second.endTime;
-                if (postWindowComplete || wallNow >= it->second.wallDeadline) {
+                if (postWindowComplete || steadyNow >= it->second.wallDeadline) {
                     expired.push_back(std::move(it->second));
                     it = activeCaptures_.erase(it);
                 } else {
@@ -206,6 +241,7 @@ public:
             if (!enqueueRecords(task.directory, task.eventName, std::move(records),
                                 std::move(pairs), true, true)) {
                 RCLCPP_ERROR(logger_, "Post-event storage failed for '%s'", task.eventName.c_str());
+                event_state::fail(task.directory, "post_event_queue_unavailable");
             }
         }
     }
@@ -234,6 +270,7 @@ private:
                 std::max(0, config->getIntConfig("retention_max_capacity_mb", 10240))) *
             kMegabyte;
         policy.retentionDays = std::max(0, config->getIntConfig("retention_days", 30));
+        policy.protectUnuploaded = config->getBoolConfig("upload_enabled", false);
         policy.cleanupInterval = std::chrono::seconds(
             std::max(1, config->getIntConfig("disk_cleanup_interval_seconds", 60)));
         return policy;
@@ -242,9 +279,9 @@ private:
     struct EventCaptureTask {
         std::string taskId;
         std::string eventName;
-        rclcpp::Time eventTime;    // sensor time domain (header.stamp)
-        rclcpp::Time endTime;      // sensor time domain
-        rclcpp::Time wallDeadline; // node clock; fires even if sensor time stalls
+        rclcpp::Time eventTime; // sensor time domain (header.stamp)
+        rclcpp::Time endTime;   // sensor time domain
+        std::chrono::steady_clock::time_point wallDeadline;
         std::filesystem::path directory;
     };
 
@@ -303,7 +340,7 @@ private:
     std::shared_ptr<DiskSpaceManager> diskManager_;
     std::unique_ptr<RawStorageWorker> storageWorker_;
     std::size_t maxActiveCaptures_;
-    rclcpp::Duration sensorStallGrace_{0, 0};
+    std::chrono::milliseconds sensorStallGrace_{0};
     bool requireSyncedData_{false};
     std::unordered_map<std::string, EventCaptureTask> activeCaptures_;
     mutable std::mutex captureMutex_;

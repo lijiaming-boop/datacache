@@ -58,6 +58,13 @@ def generate_launch_description():
 
         Node(
             package='datacache',
+            executable='event_router_node',
+            name='event_router_node',
+            output='screen',
+        ),
+
+        Node(
+            package='datacache',
             executable='event_trigger_node',
             name='event_trigger_node',
             parameters=[{

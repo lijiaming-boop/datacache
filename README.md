@@ -13,26 +13,26 @@ ROS2 事件触发的传感器数据缓存与回流系统：相机/激光雷达�
 │ node         │                │      │ matched / single-sided               │
 └──────────────┘                │  PairIndex (同步账本)                    │
                                 │      │                                   │
-┌─────────────────┐  service    │  EventMonitor (pre/post 窗口, 调度器)     │
-│ event_trigger_  │──/trigger──▶│      │ enqueue                            │
-│ node            │  _event     │  RawStorageWorker (后台线程)              │
-└─────────────────┘             │   ├ CDR 序列化 → .bin                    │
+┌─────────────────┐ EventSignal ┌──────────────┐  RPC  │  EventMonitor (pre/post 窗口, 调度器)     │
+│ keyboard_trigger│────────────▶│ event_router │──────▶│      │ enqueue                            │
+│ node            │ EventStatus │ 去重 + 冷却   │       │  RawStorageWorker (后台线程)              │
+└─────────────────┘◀────────────└──────────────┘       │   ├ CDR 序列化 → .bin                    │
                                 │   ├ zstd 压缩    → .bin.zst              │
                                 │   ├ 格式转换    → images/*.jpg           │
                                 │   │               pointclouds/*.pcd      │
                                 │   ├ manifest.csv / pairs.csv             │
                                 │   └ .complete 标记 ──▶ UploadWorker      │
                                 └──────────────────────────────────────────┘
-                                                          │ HTTP multipart
+                                                          │ UploadStore RPC / DDS
                                                           ▼
-                                                 接收端 (如 tools/mock_server.py)
+                                                 upload_receiver_node
 ```
 
 ## 构建（Ubuntu 24.04 / ROS2 Jazzy）
 
 ```bash
 sudo apt install ros-jazzy-desktop ros-jazzy-cv-bridge ros-jazzy-pcl-conversions \
-                 libzstd-dev libcurl4-openssl-dev
+                 libzstd-dev libssl-dev
 cd datacache
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
@@ -47,19 +47,31 @@ ros2 launch datacache datacache.launch.py
 
 # 终端 2: 触发一次碰撞事件(5 s pre + 10 s post 窗口)
 ros2 service call /request_trigger datacache/srv/EventTrigger "{event_name: 'collision'}"
+
+# 或使用按键闭环：c=collision，b=hard_brake，m=manual_capture，q=退出
+ros2 run datacache keyboard_trigger_node
 ```
 
-事件数据落在运行目录的 `records/<event>_<ns>/` 下：
+按键节点向可靠 Topic `/event_signal` 发布带 `trigger_id` 的 `EventSignal`，
+`event_router_node` 在 60 秒幂等窗口内拒绝重复 ID，并按事件执行冷却；随后通过
+`/trigger_event` RPC 交给缓存节点。`/event_status` 会回传 `RECEIVED → ACCEPTED →
+STORED → UPLOADED`；可重试的上传延迟会报 `UPLOAD_RETRYING`，终态失败则报
+`REJECTED / RECORD_FAILED / UPLOAD_FAILED`。
+
+事件数据落在运行目录的 `records/<event>_<sequence>_<system_ns>/` 下：
 
 ```
-records/collision_1700000000123456789/
+records/collision_0_1700000000123456789/
 ├── manifest.csv          # sensor,timestamp,file,encoding,converted_file
+├── manifest.sha256       # 全部数据文件的 SHA-256 完整性清单
 ├── pairs.csv             # pair_id,status,camera_timestamp,lidar_timestamp,time_diff_ns,reason
 ├── camera_<ns>.bin.zst   # zstd 压缩的 CDR 序列化 sensor_msgs/Image
 ├── lidar_<ns>.bin.zst    # zstd 压缩的 CDR 序列化 sensor_msgs/PointCloud2
 ├── images/camera_<ns>.jpg        # 后台转换的分析友好副本
 ├── pointclouds/lidar_<ns>.pcd
 ├── .complete             # 事件目录写入完成标记(上传模块据此启动回传)
+├── .pending              # 受理后到完整落盘前存在；启动时自动对账
+├── .failed               # 任一 pre/post/文件写入失败的明确终态
 └── .uploaded             # 上传成功后出现(如启用上传)
 ```
 
@@ -67,36 +79,38 @@ records/collision_1700000000123456789/
 
 ```bash
 # 概要: manifest/pairs 条数、每条记录的大小与编码
-ros2 run datacache record_reader records/collision_1700000000123456789
+ros2 run datacache record_reader records/collision_0_1700000000123456789
 
 # 完整性校验: 文件存在 → zstd 解压 → CDR 反序列化 → 字段自洽; 损坏返回退出码 2
-ros2 run datacache record_reader records/collision_1700000000123456789 --verify
+ros2 run datacache record_reader records/collision_0_1700000000123456789 --verify
 
 # 导出为 png / pcd
-ros2 run datacache record_reader records/collision_1700000000123456789 --export out/
+ros2 run datacache record_reader records/collision_0_1700000000123456789 --export out/
 
 # 只看相机, 前 10 条
-ros2 run datacache record_reader records/collision_1700000000123456789 --sensor camera --limit 10
+ros2 run datacache record_reader records/collision_0_1700000000123456789 --sensor camera --limit 10
 ```
 
 ## 上传/回传
 
 `RawStorageWorker` 写完一个事件目录的最后一批数据后写入 `.complete` 标记；
 `UploadWorker` 后台线程周期扫描 `record_directory`，把带 `.complete` 且未上传的
-目录通过 HTTP multipart POST 整目录发到 `upload_url`。成功写 `.uploaded`，
-失败按指数退避重试，超过 `upload_max_retries` 次写 `.upload_failed`。本地数据
-不删除，磁盘回收由保留策略负责。
+目录通过 `datacache/srv/UploadStore` RPC 按 `BEGIN → FILE_CHUNK* → END` 分块发到
+`upload_service_name`。每次事务带持久化 `transfer_id`；接收端在 END 校验文件数、
+总字节数和 `manifest.sha256` 后确认；成功写 `.uploaded`，
+失败按指数退避重试，超过 `upload_max_retries` 次写 `.upload_failed`。本地数据不删除，
+磁盘回收由保留策略负责。
 
-验证闭环可使用自带的 mock 接收端（纯 Python 标准库）：
+验证闭环可使用包内自带的 ROS2 接收节点：
 
 ```bash
-# 终端 A
-python3 tools/mock_server.py 8080 upload_inbox
+# 终端 A（构建并 source install/setup.bash 后）
+ros2 run datacache upload_receiver_node upload_inbox /upload_store
 
 # 终端 B: 打开上传开关并启动
 sed -i 's/upload_enabled=false/upload_enabled=true/' config.txt
 ros2 run datacache datacache_node --ros-args -p config_path:=config.txt
-# 触发事件后, mock 端会打印收到的文件清单(md5), 事件目录出现 .uploaded
+# 触发事件后，接收端校验 manifest.sha256，事件目录出现 .uploaded
 ```
 
 ## 单元测试
@@ -111,9 +125,11 @@ GitHub Actions 会在每次 PR 与 main 推送时自动执行：编译 + 全部�
 
 覆盖模块：ConfigManager（解析/默认值）、DataBuffer（数量与年龄驱逐/时间范围）、
 PairIndex（账本/裁剪）、ApproximateSynchronizer（配对/丢弃/冲刷）、
-record_io（写→读回环 + 损坏/撕裂行检测）、UploadWorker（候选扫描/HTTP 上传/标记/
+record_io（写→读回环 + 损坏/撕裂行检测）、UploadWorker（候选扫描/RPC 分块回传/标记/
 后台循环/重试耗尽与退避）、EventMonitor（pre/post 窗口切分/调度到期/预留回滚/
-并发上限）、DiskSpaceManager（天数与容量清理/写前检查/节流）。
+并发上限）、事件触发策略（按键释放防抖/trigger_id 幂等/按事件冷却）、
+ReceiverNode（事务暂存/重复块/空文件/路径校验）、DiskSpaceManager
+（天数与容量清理/写前检查/节流）。
 
 ## 端到端冒烟验证
 
@@ -123,9 +139,10 @@ record_io（写→读回环 + 损坏/撕裂行检测）、UploadWorker（候选�
 bash tools/smoke_test.sh
 ```
 
-脚本会启动 mock 接收端、雷达仿真与缓存节点，触发一次 collision 事件，
+脚本会启动 RPC 接收端、雷达仿真、事件路由与缓存节点，模拟按键 `m` 触发一次
+`manual_capture` 事件，
 然后依次验证：事件目录产物 → `record_reader --verify` 全量校验 → `--export`
-导出 → 上传闭环（`.uploaded` 标记 + 接收端落盘 + md5 清单）。
+导出 → 上传闭环（`.uploaded` 标记 + 接收端落盘 + SHA-256 清单）。
 
 ## 配置参考（config.txt）
 
@@ -133,6 +150,7 @@ bash tools/smoke_test.sh
 |---|---|---|
 | `buffer_size` | 1000 | 每传感器类型的缓存条数上限 |
 | `buffer_duration_seconds` | 30 | 缓存年龄上限（按最新传感器时间戳） |
+| `buffer_max_mb` | 1024 | 每类传感器的内存字节预算（0 不限制） |
 | `sync_enabled` | true | 是否启用近似时间同步 |
 | `sync_queue_size` | 100 | 同步器每侧队列上限 |
 | `sync_tolerance_ms` | 20 | 配对容差 |
@@ -155,11 +173,14 @@ bash tools/smoke_test.sh
 | `retention_max_capacity_mb` | 10240 | records 总量上限（0 禁用） |
 | `disk_cleanup_interval_seconds` | 60 | 清理节流间隔 |
 | `upload_enabled` | false | 是否启用回传 |
-| `upload_url` | — | 接收端地址，如 http://host:8080/upload |
+| `upload_service_name` | /upload_store | ROS2 回传服务名 |
 | `upload_scan_period_ms` | 2000 | 扫描周期 |
 | `upload_timeout_s` | 30 | 单次上传超时 |
 | `upload_max_retries` | 5 | 重试次数上限（超过标记 .upload_failed） |
 | `upload_retry_backoff_ms` | 15000 | 首次重试退避（指数翻倍，封顶 64 倍） |
+| `upload_lease_timeout_s` | 300 | 崩溃遗留上传租约的回收时间 |
+| `upload_failed_rescan_period_ms` | 1800000 | 上传耗尽后的自动重排队周期（0 为永久失败） |
+| `trigger_dedupe_ttl_ms` | 60000 | 缓存节点业务边界的触发幂等窗口 |
 | `enable_collision_event` 等 | true | 事件注册开关 |
 | `event_<name>_pre_time/post_time` | 5/5 | 每事件窗口秒数 |
 | `event_<name>_record_camera/lidar` | true | 每事件传感器选择 |
@@ -187,10 +208,9 @@ bash tools/smoke_test.sh
 
 ## 已知限制
 
-- 上传为自定义 multipart 格式，生产环境需接收端按相同约定解析（参考 mock_server.py）。
-- post 窗口数据入队失败（队列满）时仅记录错误，该事件目录不会有 `.complete` 标记，
-  也不会被回传。
+- 回传依赖 ROS2 DDS 服务发现与可达性；跨网段/车云链路需要部署 DDS Router、VPN 或网关，
+  并按生产要求启用 DDS Security。当前 RPC 只校验文件数和字节数，不提供密码学完整性签名。
 - `pointcloud_format` 仅支持 pcd；视频片段为逐帧图像，无 h264/h265 编码。
 - 相机节点依赖 GUI 环境的 USB 设备；无相机时可只跑 lidar_sim 链路。
-- `.upload_failed` 为永久终态，当前无自动/命令行重试入口，需人工删除标记后
-  等待下个扫描周期。
+- RPC 当前仍是逐块请求/确认，长 RTT 网络吞吐有限；`transfer_id` 可隔离和安全重传，
+  但尚未实现 QUERY 偏移协商式断点续传。

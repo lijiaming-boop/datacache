@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- 事件录制改为 `.pending → .complete/.failed` 事务，启动自动对账崩溃残留；任一
+  pre/post 或必需记录写入失败不再被误报为成功。
+- 上传增加 `.uploading` 租约、周期重排失败任务、持久化 `transfer_id`、SHA-256 清单，
+  接收端增加资源配额、空闲回收和可恢复的目录切换。
+- 触发幂等下沉到缓存节点，代理服务返回真实受理结果；修复默认关闭上传时键盘状态泄漏。
+- 统一目录保留的系统时间域与 post 稳态截止时间，缓存/同步器支持乱序帧并增加字节预算。
+- CI 增加端到端冒烟闭环，并补充事件状态、失败重排、乱序和内存预算测试。
+
 本项目的全部显著变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
@@ -14,6 +24,13 @@
 - `record_directory` 启动时解析为绝对路径并打印日志，数据不再散落于不同启动目录。
 - CMake 选项 `DATACACHE_SANITIZERS=ON` 以 AddressSanitizer/UndefinedBehaviorSanitizer
   构建（CI sanitizer 任务使用）。
+- 回传链路从 HTTP multipart/libcurl 迁移到 `UploadStore` ROS2 RPC：按
+  BEGIN/FILE_CHUNK/END 分块传输，新增可安装的 `upload_receiver_node`，并保留原有
+  重试退避及 `.uploaded` / `.upload_failed` 文件状态机。
+- 两阶段事件闭环：新增配置化事件注册和原始终端按键节点（带释放静默期防抖）；新增
+  `EventSignal` / `EventStatus`、`event_router_node`、`trigger_id` 幂等、按事件冷却及
+  `RECEIVED → ACCEPTED → STORED → UPLOADED` 生命周期状态回传。
+- 可复用 `tools/Dockerfile.ros-ci`，用于在 ROS2 Jazzy 环境复现构建、单测和闭环验证。
 
 ## [1.0.0] - 2026-08-23
 

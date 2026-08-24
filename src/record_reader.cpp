@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -37,7 +38,12 @@ void printUsage() {
 
 bool toSizeT(const char* text, std::size_t& value) {
     try {
-        value = static_cast<std::size_t>(std::stoll(text));
+        std::size_t consumed = 0;
+        const auto parsed = std::stoll(text, &consumed);
+        if (parsed < 0 || consumed != std::strlen(text)) {
+            return false;
+        }
+        value = static_cast<std::size_t>(parsed);
         return true;
     } catch (const std::exception&) {
         return false;
@@ -46,7 +52,7 @@ bool toSizeT(const char* text, std::size_t& value) {
 
 bool exportImage(const sensor_msgs::msg::Image& message, const std::filesystem::path& target) {
     if (message.height == 0 || message.width == 0 || message.step == 0 ||
-        message.step * message.height > message.data.size()) {
+        static_cast<std::uint64_t>(message.step) * message.height > message.data.size()) {
         return false;
     }
     cv::Mat image;

@@ -15,10 +15,11 @@ rclcpp::Time timeAt(std::int64_t nanoseconds) {
     return rclcpp::Time(nanoseconds, RCL_ROS_TIME);
 }
 
-SensorData cameraAt(std::int64_t nanoseconds) {
+SensorData cameraAt(std::int64_t nanoseconds, std::size_t bytes = 0) {
     auto image = std::make_shared<sensor_msgs::msg::Image>();
     image->header.stamp.sec = static_cast<std::int32_t>(nanoseconds / 1000000000LL);
     image->header.stamp.nanosec = static_cast<std::uint32_t>(nanoseconds % 1000000000LL);
+    image->data.resize(bytes);
     return SensorData{SensorType::CAMERA, CameraData{timeAt(nanoseconds), image}};
 }
 
@@ -88,6 +89,29 @@ TEST(DataBufferTest, LatestSensorTimestampTracksNewest) {
     // 更早的时间戳不会回退水位
     buffer.addData(cameraAt(500));
     EXPECT_EQ(*buffer.latestSensorTimestamp(), timeAt(2000));
+}
+
+TEST(DataBufferTest, OutOfOrderFramesRemainTimestampOrderedForEviction) {
+    DataBuffer buffer(2, rclcpp::Duration::from_seconds(20));
+    buffer.addData(cameraAt(100'000'000'000));
+    buffer.addData(cameraAt(90'000'000'000));
+    buffer.addData(cameraAt(110'000'000'000));
+
+    const auto remaining = buffer.getDataWithinTimeRange(timeAt(0), timeAt(200'000'000'000));
+    ASSERT_EQ(remaining.size(), 2U);
+    EXPECT_EQ(std::get<CameraData>(remaining[0].data).timestamp, timeAt(100'000'000'000));
+    EXPECT_EQ(std::get<CameraData>(remaining[1].data).timestamp, timeAt(110'000'000'000));
+}
+
+TEST(DataBufferTest, ByteBudgetEvictsBeforeCountLimit) {
+    DataBuffer buffer(10, rclcpp::Duration::from_seconds(0), 5);
+    buffer.addData(cameraAt(1000, 3));
+    buffer.addData(cameraAt(2000, 3));
+    buffer.addData(cameraAt(3000, 3));
+
+    const auto remaining = buffer.getAllData();
+    ASSERT_EQ(remaining.size(), 1U);
+    EXPECT_EQ(std::get<CameraData>(remaining[0].data).timestamp, timeAt(3000));
 }
 
 } // namespace

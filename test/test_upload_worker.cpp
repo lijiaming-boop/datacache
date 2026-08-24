@@ -2,166 +2,184 @@
 
 #include <gtest/gtest.h>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <chrono>
-#include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <stdexcept>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 namespace {
 
-// 进程内最小 HTTP 服务器: 读完整个请求后返回固定状态码, 记录收到的字节
-class MiniServer {
+class RclcppEnvironment : public ::testing::Environment {
 public:
-    MiniServer(int status, const std::string& body) : status_(status), body_(body) {
-        listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (listenFd_ < 0) {
-            throw std::runtime_error("socket() failed");
+    void SetUp() override {
+        if (!rclcpp::ok()) {
+            int argc = 0;
+            rclcpp::init(argc, nullptr);
         }
-        int reuse = 1;
-        ::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        address.sin_port = 0;
-        if (::bind(listenFd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
-            ::listen(listenFd_, 4) != 0) {
-            throw std::runtime_error("bind/listen failed");
-        }
-
-        socklen_t length = sizeof(address);
-        if (::getsockname(listenFd_, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
-            throw std::runtime_error("getsockname failed");
-        }
-        port_ = ntohs(address.sin_port);
-
-        thread_ = std::thread([this] { serve(); });
     }
 
-    ~MiniServer() { stop(); }
-
-    int port() const { return port_; }
-    const std::string& received() const { return received_; }
-    int requests() const { return requests_.load(); }
-
-    void stop() {
-        if (stopped_.exchange(true)) {
-            return;
+    void TearDown() override {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
         }
-        // 关闭监听 socket 解除 accept 阻塞
-        ::shutdown(listenFd_, SHUT_RDWR);
-        ::close(listenFd_);
+    }
+};
+
+[[maybe_unused]] const auto* kRclcppEnvironment =
+    ::testing::AddGlobalTestEnvironment(new RclcppEnvironment());
+
+std::string uniqueName(const std::string& prefix) {
+    static std::atomic<std::uint64_t> counter{0};
+    return prefix + "_" + std::to_string(++counter);
+}
+
+class RpcServer {
+public:
+    explicit RpcServer(bool accept)
+        : serviceName_("/" + uniqueName("upload_store_test")),
+          node_(std::make_shared<rclcpp::Node>(uniqueName("upload_rpc_server"))), accept_(accept) {
+        service_ = node_->create_service<UploadWorker::UploadStore>(
+            serviceName_, [this](const std::shared_ptr<UploadWorker::UploadRequest> request,
+                                 std::shared_ptr<UploadWorker::UploadResponse> response) {
+                handle(*request, *response);
+            });
+        executor_.add_node(node_);
+        thread_ = std::thread([this]() { executor_.spin(); });
+    }
+
+    ~RpcServer() {
+        executor_.cancel();
         if (thread_.joinable()) {
             thread_.join();
         }
+        executor_.remove_node(node_);
+    }
+
+    RpcServer(const RpcServer&) = delete;
+    RpcServer& operator=(const RpcServer&) = delete;
+
+    const std::string& serviceName() const { return serviceName_; }
+    rclcpp::Node* node() const { return node_.get(); }
+    int requests() const { return requests_.load(); }
+
+    std::map<std::string, std::vector<std::uint8_t>> files() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return files_;
     }
 
 private:
-    void serve() {
-        while (!stopped_) {
-            const int client = ::accept(listenFd_, nullptr, nullptr);
-            if (client < 0) {
-                break;
-            }
-            handle(client);
-            ::close(client);
+    void handle(const UploadWorker::UploadRequest& request,
+                UploadWorker::UploadResponse& response) {
+        ++requests_;
+        if (!accept_) {
+            response.success = false;
+            response.message = "rejected for test";
+            return;
         }
-    }
 
-    void handle(int client) {
-        std::string request;
-        char buffer[4096];
-        while (request.find("\r\n\r\n") == std::string::npos) {
-            const auto bytes = ::recv(client, buffer, sizeof(buffer), 0);
-            if (bytes <= 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request.opcode == UploadWorker::UploadRequest::BEGIN) {
+            event_ = request.event_name;
+            expectedFiles_ = request.file_count;
+            expectedBytes_ = request.total_bytes;
+            files_.clear();
+            response.success = true;
+            response.message = "started";
+            return;
+        }
+        if (request.event_name != event_) {
+            response.success = false;
+            response.message = "event mismatch";
+            return;
+        }
+        if (request.opcode == UploadWorker::UploadRequest::FILE_CHUNK) {
+            auto& bytes = files_[request.file_path];
+            if (request.offset != bytes.size() ||
+                request.offset + request.data.size() > request.total_bytes) {
+                response.success = false;
+                response.message = "offset or size mismatch";
                 return;
             }
-            request.append(buffer, static_cast<std::size_t>(bytes));
+            bytes.insert(bytes.end(), request.data.begin(), request.data.end());
+            response.success = true;
+            response.message = "stored";
+            return;
         }
-
-        // 读完 Content-Length 指定的请求体
-        std::size_t contentLength = 0;
-        const auto position = request.find("Content-Length:");
-        if (position != std::string::npos) {
-            contentLength = static_cast<std::size_t>(std::stoull(request.substr(position + 15)));
-        }
-        const auto headerEnd = request.find("\r\n\r\n") + 4;
-        while (request.size() - headerEnd < contentLength) {
-            const auto bytes = ::recv(client, buffer, sizeof(buffer), 0);
-            if (bytes <= 0) {
-                return;
+        if (request.opcode == UploadWorker::UploadRequest::END) {
+            std::uint64_t received = 0;
+            for (const auto& [path, bytes] : files_) {
+                (void)path;
+                received += bytes.size();
             }
-            request.append(buffer, static_cast<std::size_t>(bytes));
+            response.received_bytes = received;
+            response.success = files_.size() == expectedFiles_ && received == expectedBytes_;
+            response.message = response.success ? "complete" : "count mismatch";
+            return;
         }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            received_ = request;
-            ++requests_;
-        }
-
-        const auto statusText = status_ == 200 ? "OK" : "Internal Server Error";
-        std::string response = "HTTP/1.1 " + std::to_string(status_) + " " + statusText +
-                               "\r\nContent-Type: application/json\r\nContent-Length: " +
-                               std::to_string(body_.size()) + "\r\nConnection: close\r\n\r\n" +
-                               body_;
-        std::size_t sent = 0;
-        while (sent < response.size()) {
-            const auto bytes = ::send(client, response.data() + sent, response.size() - sent, 0);
-            if (bytes <= 0) {
-                break;
-            }
-            sent += static_cast<std::size_t>(bytes);
-        }
+        response.success = false;
+        response.message = "unknown opcode";
     }
 
-    int status_;
-    std::string body_;
-    int listenFd_{-1};
-    int port_{0};
+    std::string serviceName_;
+    std::shared_ptr<rclcpp::Node> node_;
+    rclcpp::Service<UploadWorker::UploadStore>::SharedPtr service_;
+    rclcpp::executors::SingleThreadedExecutor executor_;
     std::thread thread_;
-    std::atomic<bool> stopped_{false};
+    bool accept_;
     std::atomic<int> requests_{0};
-    std::mutex mutex_;
-    std::string received_;
+    mutable std::mutex mutex_;
+    std::string event_;
+    std::uint32_t expectedFiles_{0};
+    std::uint64_t expectedBytes_{0};
+    std::map<std::string, std::vector<std::uint8_t>> files_;
 };
 
 std::filesystem::path makeTempDir(const std::string& tag) {
-    static std::uint64_t counter = 0;
-    const auto dir = std::filesystem::temp_directory_path() /
-                     ("datacache_upload_" + tag + "_" +
-                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                      "_" + std::to_string(++counter));
-    std::filesystem::create_directories(dir);
-    return dir;
+    const auto directory =
+        std::filesystem::temp_directory_path() / uniqueName("datacache_upload_" + tag);
+    std::filesystem::create_directories(directory);
+    return directory;
 }
 
 void writeFile(const std::filesystem::path& path, const std::string& content) {
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
-    std::ofstream output(path, std::ios::trunc);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output << content;
 }
 
-UploadWorker::Config localConfig(int port) {
+UploadWorker::Config localConfig(const std::string& serviceName) {
     UploadWorker::Config config;
-    config.url = "http://127.0.0.1:" + std::to_string(port) + "/upload";
-    config.timeoutSeconds = 5;
+    config.serviceName = serviceName;
+    config.timeoutSeconds = 2;
     config.maxRetries = 2;
-    config.scanPeriod = std::chrono::milliseconds(50);
+    config.scanPeriod = std::chrono::milliseconds(30);
     config.retryBackoff = std::chrono::milliseconds(50);
+    config.chunkBytes = 4;
     return config;
+}
+
+bool waitUntil(const std::function<bool()>& predicate,
+               std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
 }
 
 TEST(UploadWorkerTest, FindsOnlyCompleteUnuploadedDirectories) {
@@ -170,20 +188,20 @@ TEST(UploadWorkerTest, FindsOnlyCompleteUnuploadedDirectories) {
     const auto writing = root / "hard_brake_1700000000000000001";
     const auto uploaded = root / "collision_1700000000000000002";
     const auto failed = root / "collision_1700000000000000003";
-    const auto plainFile = root / "not_a_directory";
 
-    for (const auto* dir : {&ready, &writing, &uploaded, &failed}) {
-        std::filesystem::create_directories(*dir);
-        writeFile(*dir / "manifest.csv", "sensor,timestamp,file,encoding,converted\n");
+    for (const auto* directory : {&ready, &writing, &uploaded, &failed}) {
+        writeFile(*directory / "manifest.csv", "header\n");
     }
     writeFile(ready / ".complete", "records=1\n");
     writeFile(uploaded / ".complete", "records=1\n");
-    writeFile(uploaded / ".uploaded", "url=x\n");
+    writeFile(uploaded / ".uploaded", "service=x\n");
     writeFile(failed / ".complete", "records=1\n");
     writeFile(failed / ".upload_failed", "attempts=2\n");
-    writeFile(plainFile, "data");
+    writeFile(root / "not_a_directory", "data");
 
-    UploadWorker worker(root, localConfig(80), rclcpp::get_logger("test"));
+    auto node = std::make_shared<rclcpp::Node>(uniqueName("upload_scan_client"));
+    UploadWorker worker(root, localConfig("/unused_upload_service"), rclcpp::get_logger("test"),
+                        node.get());
     const auto candidates = worker.findUploadCandidates();
     ASSERT_EQ(candidates.size(), 1U);
     EXPECT_EQ(candidates[0].filename(), ready.filename());
@@ -192,111 +210,93 @@ TEST(UploadWorkerTest, FindsOnlyCompleteUnuploadedDirectories) {
     std::filesystem::remove_all(root, error);
 }
 
-TEST(UploadWorkerTest, UploadDirectoryPostsAndMarksUploaded) {
-    MiniServer server(200, "{\"status\":\"ok\"}");
-
-    const auto root = makeTempDir("post_ok");
+TEST(UploadWorkerTest, RpcTransferChunksFilesAndMarksUploaded) {
+    RpcServer server(true);
+    const auto root = makeTempDir("rpc_ok");
     const auto event = root / "collision_1700000000000000000";
-    writeFile(event / ".complete", "records=2\n");
-    writeFile(event / "manifest.csv", "sensor,timestamp,file,encoding,converted\n");
-    writeFile(event / "camera_1.bin.zst", "compressed-bytes");
+    writeFile(event / ".complete", "records=3\n");
+    writeFile(event / "manifest.csv", "manifest-data");
     writeFile(event / "images" / "camera_1.jpg", "jpeg-bytes");
+    writeFile(event / "empty.bin", "");
 
-    UploadWorker worker(root, localConfig(server.port()), rclcpp::get_logger("test"));
+    UploadWorker worker(root, localConfig(server.serviceName()), rclcpp::get_logger("test"),
+                        server.node());
+    ASSERT_TRUE(waitUntil([&worker]() { return worker.serviceReady(); }));
     ASSERT_TRUE(worker.uploadDirectory(event));
 
-    // 成功标记已写入, 之后再也不会成为候选
     EXPECT_TRUE(std::filesystem::exists(event / ".uploaded"));
     EXPECT_TRUE(worker.findUploadCandidates().empty());
-
-    // 服务端收到了完整请求: 事件名出现在 query, 文件名与内容出现在 multipart 体
-    const auto& received = server.received();
-    EXPECT_NE(received.find("POST /upload?event=collision_1700000000000000000"), std::string::npos);
-    EXPECT_NE(received.find("manifest.csv"), std::string::npos);
-    EXPECT_NE(received.find("images/camera_1.jpg"), std::string::npos);
-    EXPECT_NE(received.find("compressed-bytes"), std::string::npos);
-    EXPECT_NE(received.find("jpeg-bytes"), std::string::npos);
-    // 标记文件本身不应被上传
-    EXPECT_EQ(received.find(".complete"), std::string::npos);
+    const auto files = server.files();
+    ASSERT_EQ(files.size(), 3U);
+    EXPECT_EQ(std::string(files.at("manifest.csv").begin(), files.at("manifest.csv").end()),
+              "manifest-data");
+    EXPECT_EQ(
+        std::string(files.at("images/camera_1.jpg").begin(), files.at("images/camera_1.jpg").end()),
+        "jpeg-bytes");
+    EXPECT_TRUE(files.at("empty.bin").empty());
+    EXPECT_EQ(files.count(".complete"), 0U);
 
     std::error_code error;
     std::filesystem::remove_all(root, error);
 }
 
-TEST(UploadWorkerTest, UploadFailureLeavesNoSuccessMarker) {
-    MiniServer server(500, "{\"status\":\"error\"}");
-
-    const auto root = makeTempDir("post_fail");
+TEST(UploadWorkerTest, RejectedRpcLeavesDirectoryEligibleForRetry) {
+    RpcServer server(false);
+    const auto root = makeTempDir("rpc_reject");
     const auto event = root / "hard_brake_1700000000000000000";
     writeFile(event / ".complete", "records=1\n");
     writeFile(event / "lidar_1.bin.zst", "compressed-bytes");
 
-    UploadWorker worker(root, localConfig(server.port()), rclcpp::get_logger("test"));
+    UploadWorker worker(root, localConfig(server.serviceName()), rclcpp::get_logger("test"),
+                        server.node());
+    ASSERT_TRUE(waitUntil([&worker]() { return worker.serviceReady(); }));
     EXPECT_FALSE(worker.uploadDirectory(event));
     EXPECT_FALSE(std::filesystem::exists(event / ".uploaded"));
-    // 未标记成功 → 仍是回传候选(等待重试)
     EXPECT_EQ(worker.findUploadCandidates().size(), 1U);
 
     std::error_code error;
     std::filesystem::remove_all(root, error);
 }
 
-TEST(UploadWorkerTest, BackgroundLoopUploadsThenIdles) {
-    MiniServer server(200, "{\"status\":\"ok\"}");
-
+TEST(UploadWorkerTest, BackgroundLoopTransfersCompletedDirectory) {
+    RpcServer server(true);
     const auto root = makeTempDir("loop");
     const auto event = root / "collision_1700000000000000000";
     writeFile(event / ".complete", "records=1\n");
     writeFile(event / "camera_1.bin.zst", "compressed-bytes");
 
-    UploadWorker worker(root, localConfig(server.port()), rclcpp::get_logger("test"));
+    UploadWorker worker(root, localConfig(server.serviceName()), rclcpp::get_logger("test"),
+                        server.node());
+    ASSERT_TRUE(waitUntil([&worker]() { return worker.serviceReady(); }));
     worker.start();
-
-    // 后台线程应在几个扫描周期内完成上传并写标记
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!std::filesystem::exists(event / ".uploaded")) {
-        ASSERT_LT(std::chrono::steady_clock::now(), deadline)
-            << "background upload did not finish in time";
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    EXPECT_GE(server.requests(), 1);
+    EXPECT_TRUE(waitUntil([&event]() { return std::filesystem::exists(event / ".uploaded"); }));
     worker.stop();
+    EXPECT_GE(server.requests(), 3); // BEGIN, at least one FILE_CHUNK, END
 
     std::error_code error;
     std::filesystem::remove_all(root, error);
 }
 
-TEST(UploadWorkerTest, RetriesExhaustedWritesFailedMarkerAndStops) {
-    MiniServer server(500, "{\"status\":\"error\"}");
-
+TEST(UploadWorkerTest, RetryExhaustionWritesFailedMarker) {
+    RpcServer server(false);
     const auto root = makeTempDir("retry");
     const auto event = root / "collision_1700000000000000000";
     writeFile(event / ".complete", "records=1\n");
     writeFile(event / "camera_1.bin.zst", "compressed-bytes");
 
-    auto config = localConfig(server.port());
+    auto config = localConfig(server.serviceName());
     config.maxRetries = 3;
-    config.retryBackoff = std::chrono::milliseconds(50); // 50ms → 100ms → 200ms
-    config.scanPeriod = std::chrono::milliseconds(30);
-    UploadWorker worker(root, config, rclcpp::get_logger("test"));
+    UploadWorker worker(root, config, rclcpp::get_logger("test"), server.node());
+    ASSERT_TRUE(waitUntil([&worker]() { return worker.serviceReady(); }));
     worker.start();
-
-    // 重试耗尽后写 .upload_failed 终态标记
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!std::filesystem::exists(event / ".upload_failed")) {
-        ASSERT_LT(std::chrono::steady_clock::now(), deadline)
-            << "upload did not exhaust retries in time";
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-
-    // 终态之后: 再等几个扫描周期也不应有新请求, 且不再是候选
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    EXPECT_EQ(server.requests(), 3);
-    EXPECT_TRUE(worker.findUploadCandidates().empty());
+    EXPECT_TRUE(
+        waitUntil([&event]() { return std::filesystem::exists(event / ".upload_failed"); }));
     worker.stop();
 
-    std::ifstream failedMarker(event / ".upload_failed");
-    const std::string content((std::istreambuf_iterator<char>(failedMarker)),
+    EXPECT_EQ(server.requests(), 3);
+    EXPECT_TRUE(worker.findUploadCandidates().empty());
+    std::ifstream marker(event / ".upload_failed");
+    const std::string content((std::istreambuf_iterator<char>(marker)),
                               std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("attempts=3"), std::string::npos);
 
@@ -304,35 +304,56 @@ TEST(UploadWorkerTest, RetriesExhaustedWritesFailedMarkerAndStops) {
     std::filesystem::remove_all(root, error);
 }
 
-TEST(UploadWorkerTest, BackoffDelaysRetryAttempts) {
-    MiniServer server(500, "{\"status\":\"error\"}");
-
+TEST(UploadWorkerTest, ExponentialBackoffDelaysRetries) {
+    RpcServer server(false);
     const auto root = makeTempDir("backoff");
     const auto event = root / "collision_1700000000000000000";
     writeFile(event / ".complete", "records=1\n");
     writeFile(event / "camera_1.bin.zst", "compressed-bytes");
 
-    auto config = localConfig(server.port());
+    auto config = localConfig(server.serviceName());
     config.maxRetries = 3;
-    config.retryBackoff = std::chrono::milliseconds(200); // 200ms → 400ms
+    config.retryBackoff = std::chrono::milliseconds(200);
     config.scanPeriod = std::chrono::milliseconds(20);
-    UploadWorker worker(root, config, rclcpp::get_logger("test"));
-    worker.start();
+    UploadWorker worker(root, config, rclcpp::get_logger("test"), server.node());
+    ASSERT_TRUE(waitUntil([&worker]() { return worker.serviceReady(); }));
 
     const auto started = std::chrono::steady_clock::now();
-    const auto deadline = started + std::chrono::seconds(10);
-    while (!std::filesystem::exists(event / ".upload_failed")) {
-        ASSERT_LT(std::chrono::steady_clock::now(), deadline)
-            << "upload did not exhaust retries in time";
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
+    worker.start();
+    EXPECT_TRUE(waitUntil([&event]() { return std::filesystem::exists(event / ".upload_failed"); },
+                          std::chrono::seconds(10)));
     worker.stop();
 
-    // 三次请求之间的退避合计至少 200+400=600ms(指数递增), 即排除"每轮扫描都
-    // 立即重试"的退化行为; 上界留给调度与网络开销足够宽松
     const auto elapsed = std::chrono::steady_clock::now() - started;
     EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 600);
     EXPECT_EQ(server.requests(), 3);
+
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+}
+
+TEST(UploadWorkerTest, FailedMarkerBecomesRetryableAfterRescanPeriod) {
+    RpcServer server(false);
+    const auto root = makeTempDir("failed_rescan");
+    const auto event = root / "collision_1700000000000000000";
+    writeFile(event / ".complete", "records=1\n");
+    writeFile(event / "camera_1.bin.zst", "compressed-bytes");
+
+    auto config = localConfig(server.serviceName());
+    config.maxRetries = 1;
+    config.failedRescanPeriod = std::chrono::milliseconds(80);
+    UploadWorker worker(root, config, rclcpp::get_logger("test"), server.node());
+    ASSERT_TRUE(waitUntil([&worker]() { return worker.serviceReady(); }));
+    worker.start();
+    ASSERT_TRUE(
+        waitUntil([&event]() { return std::filesystem::exists(event / ".upload_failed"); }));
+    worker.stop();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto candidates = worker.findUploadCandidates();
+    ASSERT_EQ(candidates.size(), 1U);
+    EXPECT_EQ(candidates[0], event);
+    EXPECT_FALSE(std::filesystem::exists(event / ".upload_failed"));
 
     std::error_code error;
     std::filesystem::remove_all(root, error);

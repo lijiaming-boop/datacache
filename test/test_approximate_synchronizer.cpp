@@ -155,4 +155,15 @@ TEST(ApproximateSynchronizerTest, SingleSideAloneNeverMatchesOrDrops) {
     EXPECT_TRUE(harness.drops_.empty());
 }
 
+TEST(ApproximateSynchronizerTest, ReordersOccasionalOutOfOrderFramesBeforeMatching) {
+    SynchronizerHarness harness(5, 5);
+    harness.synchronizer_.addImage(imageAt(200'000'000));
+    harness.synchronizer_.addImage(imageAt(100'000'000));
+    harness.synchronizer_.addPointCloud(cloudAt(100'000'000));
+
+    ASSERT_EQ(harness.matches_.size(), 1U);
+    EXPECT_EQ(harness.matches_[0].imageNs, 100'000'000);
+    EXPECT_TRUE(harness.drops_.empty());
+}
+
 } // namespace

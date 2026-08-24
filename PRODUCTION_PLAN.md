@@ -1,6 +1,9 @@
 # DataCache 生产化改进方案
 
 本文承接差距分析（见第 11 节对照表），对每项不足给出**可落地的解决方案**：
+
+> 2026-08-23 实施状态：2.1/2.2/2.3、3.2、4.3 已完成；4.2 已完成
+> `transfer_id` 与安全整段重传，QUERY 偏移协商仍待实现；冒烟闭环已进入 CI。
 方案思路、改动落点（精确到模块/文件）、验收标准与权衡。供评审与排期使用；
 配套的实施顺序见第 10 节的四个里程碑。
 
@@ -22,8 +25,8 @@
 | 静默数据丢失 | `.pending`/`.failed` 标记 + 启动对账 + 运维 CLI | M1 | 中 |
 | 上传终态不可恢复 | 失败周期性重排队 + CLI 重试入口 | M1 | 小 |
 | 事件风暴 | 冷却期 + 活跃窗口合并 | M1 | 小 |
-| 车云安全 | TLS + Bearer 认证 + 清单哈希 | M2 | 中 |
-| 上传内存/断点 | 流式上传（mime file callback）+ 单档传输协议 v2 | M2 | 中 |
+| 车云安全 | DDS Security + 网络边界网关 + 清单哈希 | M2 | 中 |
+| 回传断点 | RPC 已分块流式读取；补 transfer_id + 断点查询 | M2 | 中 |
 | 容量与吞吐 | 字节级缓存预算 + 基准测试 + 可选存储线程池 | M2/M3 | 中 |
 | 可观测性 | 指标主题 + 每事件元数据（event.json） | M2 | 中 |
 | 生态互通 | record_reader 增加 MCAP 导出 | M3 | 中 |
@@ -40,7 +43,7 @@
 三个 job：
 
 1. **build+test**：`colcon build` → `colcon test` → `colcon test-result`，
-   失败即红。依赖用 apt 装 `libzstd-dev libcurl4-openssl-dev` 及 rosdep 解析。
+   失败即红。依赖用 apt 装 `libzstd-dev` 及 rosdep 解析。
 2. **format**：仓库加 `.clang-format`（按现有代码风格生成一次后固化），
    CI 跑 `clang-format --dry-run --Werror` 只检查不重写。
 3. **sanitizers**（可与 1 同 job 分步）：以
@@ -180,24 +183,21 @@ README"已知限制"中"需人工删除标记"的操作由此工具化并留痕�
 
 ### 3.1 传输加密与认证
 
-**方案**：UploadWorker 的 Config 增加三项，全部映射到既有 libcurl 选项：
+**现状变化**：回传已从 HTTP/libcurl 迁移为 `UploadStore` ROS2 RPC，因此原 TLS、
+Bearer 与 curl 配置不再适用。
 
-| 配置 | curl 选项 | 语义 |
-|---|---|---|
-| `upload_ca_cert` | `CURLOPT_CAINFO` | 校验接收端证书（HTTPS 前提） |
-| `upload_client_cert` / `upload_client_key` | `CURLOPT_SSLCERT`/`CURLOPT_SSLKEY` | 可选 mTLS 双向认证 |
-| `upload_auth_token` | 自定义头 `Authorization: Bearer …` | 应用层令牌，最简可用方案 |
+**方案**：生产 DDS 域启用 SROS2/DDS Security（身份认证、访问控制、加密），为
+DataCacheNode 与接收节点签发独立身份，并把 `/upload_store` 的 call/execute 权限写入
+治理策略。车云跨网段通过 DDS Router/VPN 或受控网关连接，不直接向公网暴露 DDS 发现。
 
-接收端最小实现并入 `tools/mock_server.py`（读 `Authorization` 头并校验，
-文档注明生产应挂在 TLS 反代之后或原生 SSL）。
-
-**验收**：单测用进程内 HTTPS（自签证书）验证：无 token 拒绝、带 token 通过。
+**验收**：无授权身份无法发现或调用 `/upload_store`；授权发送端可完成回传；抓包中
+不可读取 FILE_CHUNK 载荷；权限策略拒绝非回传节点执行服务。
 
 ### 3.2 数据完整性清单
 
 **方案**：`finalJob` 时除 `.complete` 外再写 `manifest.sha256`：
 对目录内每个数据文件（含转换副本）算 SHA-256，格式
-`<sha256>  <relative_path>`。接收端校验脚本随 `mock_server.py` 提供。
+`<sha256>  <relative_path>`。`upload_receiver_node` 在 END 发布暂存目录前验证清单。
 上链签名（HMAC/车辆证书）作为后续可选增强，清单格式预留 `sig:` 行。
 
 **验收**：传输途中篡改任一字节，接收端校验脚本报错并指出文件。
@@ -206,29 +206,22 @@ README"已知限制"中"需人工删除标记"的操作由此工具化并留痕�
 
 ## 4. 传输效率与资源（M2）
 
-### 4.1 流式上传（消除内存尖峰）
+### 4.1 分块流式回传（已完成，补性能验收）
 
-**方案**：`postDirectory` 改用 `curl_mime_file_cb`（libcurl ≥ 7.56，代码注释已
-预留此演进）：文件按回调分块从磁盘直读，峰值内存从"整目录"降为"单块缓冲"。
-对目录内文件仍逐个 part，保持现有接收端解析约定不变。
+**现状**：`transferDirectory` 已按文件流式读取，默认以 512 KiB FILE_CHUNK RPC
+发送，接口把单块限制为 1 MiB；峰值负载内存不再随整目录大小增长。
 
-**落点**：`upload_worker.hpp:167` postDirectory 重构；`collectFiles` 不变。
+**待办**：增加 200MB 合成目录基准，断言进程 RSS 增量 < 50MB，并测量不同 chunk
+大小和 RTT 下的吞吐，决定是否需要多块流水线或异步批量确认。
 
-**验收**：上传 200MB 合成目录时进程 RSS 增量 < 50MB（测试脚本断言）。
+### 4.2 RPC 协议 v2：传输身份 + 断点续传
 
-### 4.2 传输协议 v2：单档 + 断点续传（可选开关）
+**方案**：在接口中增加 `transfer_id` 与 QUERY/ABORT 操作。接收端按
+`transfer_id + event_name + file_path` 保存已连续接收偏移；发送端重启后先 QUERY，
+从接收端确认的偏移继续发送。END 仍以 manifest.sha256 校验后原子发布目录。
 
-**方案**：新配置 `upload_bundle=true` 启用：
-
-- 发送端把事件目录按固定顺序打包为单个 `event.tar.zst`（zstd 级别沿用压缩配置），
-  以 `PUT` 方式上传，先发 `HEAD` 查询接收端已有的 `.part` 偏移，再以
-  `Range` 续传；
-- 接收端写 `<name>.tar.zst.part`，收齐后校验 manifest.sha256 并原子改名。
-
-自定义 multipart 保留为默认（向后兼容），v2 的参考实现进 `tools/mock_server.py`。
-车队规模大、或对接 S3/MinIO 时，此协议可直接映射为 multipart upload。
-
-**验收**：中途 kill 发送端，重启后从断点续传完成，端到端 md5 一致。
+**验收**：中途 kill 发送端，重启后不重传已确认块，最终目录 SHA-256 全部一致；
+陈旧 transfer_id 可按超时清理，不能覆盖另一个发送端正在进行的事务。
 
 ### 4.3 字节级缓存预算
 
@@ -368,7 +361,7 @@ sensorId，encoding 加 `raw_cdr`），**不参与同步配对**。雷达/IMU �
 
 | README 已知限制 | 由哪个方案解决 |
 |---|---|
-| 自定义 multipart，生产需按约定对接 | 3.1（TLS/认证）+ 4.2（协议 v2 文档化与参考实现） |
+| 自定义 RPC 需生产安全与跨网段方案 | 3.1（DDS Security/网关）+ 4.2（断点协议 v2） |
 | post 批入队失败无标记、不回传 | 2.1（`.failed`）+ 2.2（对账） |
 | 视频无 h264/h265 编码 | 不解决（维持逐帧），MCAP 导出（6）改善生态侧 |
 | `.upload_failed` 终态无重试 | 2.3（周期重排 + CLI） |
@@ -386,7 +379,7 @@ M1 静默丢失清零（约 1–2 周）
    → 事件冷却/合并 → camera 重试 → 崩溃注入测试
    （依赖 M0 的 CI 承接测试）
 M2 安全与资源（约 1–2 周）
-   TLS/token → manifest.sha256 → 流式上传 → 字节预算 → 基准 nightly
+   DDS Security/网关 → manifest.sha256 → RPC 断点续传 → 字节预算 → 基准 nightly
    → /diagnostics 指标 → event.json 审计 → launch 测试 + 覆盖率门禁
    （依赖 M1 的标记扩展；4.5 线程池视 4.4 数据决定）
 M3 生态与扩展（约 3–4 周，可拆散并行）
@@ -406,9 +399,9 @@ M3 生态与扩展（约 3–4 周，可拆散并行）
 |---|---|
 | 无 CI / LICENSE 占位 / 无版本机制 / 无 lint 与 sanitizer | 1.1–1.3 |
 | 孤儿目录、受理≠落盘、`.upload_failed` 终态、事件风暴、camera_node 退出 | 2.1–2.5 |
-| 明文 HTTP、无认证、数据无签名、配置静默默认 | 3.1–3.2、1.3 |
+| DDS RPC 未启用安全、数据无签名、配置静默默认 | 3.1–3.2、1.3 |
 | 无 metrics、无事件审计 | 5.1–5.2 |
-| 自定义格式不入生态、整目录入内存、无断点续传 | 6、4.1–4.2 |
+| 自定义格式不入生态、RPC 无断点续传 | 6、4.1–4.2 |
 | 内存按条数、单线程吞吐未验证 | 4.3–4.5 |
 | 事件硬编码、两传感器硬约束、时钟偏移盲区、相对路径 | 7.1–7.3、1.3 |
 | 崩溃一致性/launch/覆盖率测试缺失 | 8 |

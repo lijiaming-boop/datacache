@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -35,12 +34,12 @@ public:
         PendingResults results;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (images_.size() >= queueSize_) {
+            insertOrdered(images_, image);
+            while (images_.size() > queueSize_) {
                 recordDrop(results.drops, "camera", stamp(images_.front()),
                            "synchronizer queue full");
                 images_.pop_front();
             }
-            images_.push_back(image);
             tryMatchLocked(results);
         }
         dispatch(results);
@@ -50,12 +49,12 @@ public:
         PendingResults results;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (clouds_.size() >= queueSize_) {
+            insertOrdered(clouds_, cloud);
+            while (clouds_.size() > queueSize_) {
                 recordDrop(results.drops, "lidar", stamp(clouds_.front()),
                            "synchronizer queue full");
                 clouds_.pop_front();
             }
-            clouds_.push_back(cloud);
             tryMatchLocked(results);
         }
         dispatch(results);
@@ -102,6 +101,22 @@ private:
         std::vector<DropResult> drops;
     };
 
+    template <typename Message>
+    static void insertOrdered(std::deque<std::shared_ptr<Message>>& queue,
+                              const std::shared_ptr<Message>& message) {
+        const auto timestamp = stamp(message);
+        if (queue.empty() || timestamp >= stamp(queue.back())) {
+            queue.push_back(message);
+            return;
+        }
+        const auto position = std::upper_bound(
+            queue.begin(), queue.end(), timestamp,
+            [](const rclcpp::Time& value, const std::shared_ptr<Message>& candidate) {
+                return value < stamp(candidate);
+            });
+        queue.insert(position, message);
+    }
+
     void recordDrop(std::vector<DropResult>& drops, const std::string& sensor,
                     const rclcpp::Time& timestamp, const std::string& reason) {
         auto& count = sensor == "camera" ? droppedImages_ : droppedClouds_;
@@ -117,10 +132,12 @@ private:
     void tryMatchLocked(PendingResults& results) {
         while (!images_.empty() && !clouds_.empty()) {
             const auto difference = (stamp(images_.front()) - stamp(clouds_.front())).nanoseconds();
-            if (std::llabs(difference) <= tolerance_.nanoseconds()) {
+            const auto tolerance = tolerance_.nanoseconds();
+            if (difference >= -tolerance && difference <= tolerance) {
+                const auto magnitude = difference < 0 ? -difference : difference;
                 results.matches.push_back(
                     MatchResult{images_.front(), clouds_.front(),
-                                rclcpp::Duration::from_nanoseconds(std::llabs(difference))});
+                                rclcpp::Duration::from_nanoseconds(magnitude)});
                 images_.pop_front();
                 clouds_.pop_front();
                 continue;

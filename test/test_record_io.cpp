@@ -189,7 +189,7 @@ TEST(RecordIoTest, VerifyDetectsCorruption) {
     EXPECT_FALSE(report.ok());
     EXPECT_EQ(report.failedEntries, 1U);
     EXPECT_EQ(report.verifiedEntries, 1U);
-    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_GE(report.problems.size(), 2U); // SHA-256 mismatch + record decode failure
 }
 
 TEST(RecordIoTest, VerifyHandlesMissingManifestAndSensorFilter) {

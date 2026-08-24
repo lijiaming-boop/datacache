@@ -23,6 +23,7 @@ public:
         std::uintmax_t maxCapacityBytes{0}; // records 总量上限，0 = 禁用
         int retentionDays{0};               // 事件目录保留天数，0 = 禁用
         std::chrono::seconds cleanupInterval{60};
+        bool protectUnuploaded{false};
     };
 
     DiskSpaceManager(std::filesystem::path recordRoot, Policy policy, rclcpp::Logger logger)
@@ -129,7 +130,23 @@ private:
             if (!it->is_directory(entryError) || entryError) {
                 continue;
             }
-            EventDir dir{it->path(), parseEventTimestamp(it->path().filename().string()), 0};
+            const auto path = it->path();
+            // Never race retention against an event that is still being written or uploaded.
+            if (std::filesystem::exists(path / ".pending", entryError) ||
+                std::filesystem::exists(path / ".uploading", entryError) ||
+                std::filesystem::exists(path / ".uploading.tmp", entryError)) {
+                continue;
+            }
+            const bool complete = std::filesystem::exists(path / ".complete", entryError);
+            const bool failed = std::filesystem::exists(path / ".failed", entryError);
+            if (!complete && !failed) {
+                continue;
+            }
+            if (policy_.protectUnuploaded && complete &&
+                !std::filesystem::exists(path / ".uploaded", entryError)) {
+                continue;
+            }
+            EventDir dir{path, parseEventTimestamp(path.filename().string()), 0};
             if (dir.timestampNs >= 0) {
                 dirs.push_back(std::move(dir));
             }
@@ -190,12 +207,20 @@ private:
 
     std::uintmax_t availableBytes() const {
         std::error_code error;
-        auto info = std::filesystem::space(recordRoot_, error);
-        if (error) {
-            info = std::filesystem::space(".", error); // root 尚未创建时退回当前目录所在卷
+        auto probe = recordRoot_;
+        while (!probe.empty() && !std::filesystem::exists(probe, error)) {
+            error.clear();
+            const auto parent = probe.parent_path();
+            if (parent == probe) {
+                break;
+            }
+            probe = parent;
         }
+        const auto info = std::filesystem::space(probe.empty() ? recordRoot_ : probe, error);
         if (error) {
-            return std::numeric_limits<std::uintmax_t>::max(); // stat 失败按充足处理，不中断录制
+            RCLCPP_ERROR(logger_, "Cannot determine free disk space for %s: %s",
+                         recordRoot_.string().c_str(), error.message().c_str());
+            return 0; // Safety policy is enabled: unknown capacity must fail closed.
         }
         return info.available;
     }

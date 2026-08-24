@@ -209,7 +209,7 @@ TEST(EventMonitorTest, RejectsEventWithoutSyncedPairWhenRequired) {
 
 TEST(EventMonitorTest, RollsBackReservationWhenPreEnqueueFails) {
     // max_pending_storage_jobs=1: reserve 占掉唯一槽位后, pre 批次必然入队失败,
-    // 事件应整体回滚(不留捕获任务、不留半目录)
+    // 事件应整体回滚，且用 .failed 留下可诊断结果，不能伪装成完整目录。
     MonitorFixture fixture(/*pre=*/1, /*post=*/1, /*pending=*/1, /*active=*/2, /*grace=*/0);
 
     fixture.buffer->addData(cameraAt(1'000'000'000));
@@ -219,7 +219,10 @@ TEST(EventMonitorTest, RollsBackReservationWhenPreEnqueueFails) {
     fixture.buffer->addData(cameraAt(3'000'000'000));
     fixture.monitor->processExpiredCaptures();
     EXPECT_FALSE(waitFor([&] { return anyCompleteMarker(fixture.recordsRoot); }, 500));
-    EXPECT_TRUE(listEventDirs(fixture.recordsRoot).empty());
+    const auto eventDirs = listEventDirs(fixture.recordsRoot);
+    ASSERT_EQ(eventDirs.size(), 1U);
+    EXPECT_TRUE(std::filesystem::exists(eventDirs[0] / ".failed"));
+    EXPECT_FALSE(std::filesystem::exists(eventDirs[0] / ".pending"));
 }
 
 TEST(EventMonitorTest, MaxActiveCapturesRejectsExcessEvents) {

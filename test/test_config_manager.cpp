@@ -134,7 +134,7 @@ TEST(ConfigManagerTest, ValidConfigIncludingPatternKeysHasNoProblems) {
                         "event_hard_brake_record_lidar=false\n"
                         "enable_hard_brake_event=true\n"
                         "watchdog_camera_stale_timeout_ms=2000\n"
-                        "upload_url=http://127.0.0.1:8080/upload\n"
+                        "upload_service_name=/upload_store\n"
                         "config_strict=true\n");
     ConfigManager manager(rclcpp::get_logger("test"));
     EXPECT_TRUE(manager.loadConfig(file.path()));

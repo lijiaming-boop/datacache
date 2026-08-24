@@ -2,6 +2,7 @@
 
 #include "data.hpp"
 #include "disk_space_manager.hpp"
+#include "event_state.hpp"
 #include "pair_index.hpp"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -16,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -26,6 +29,7 @@
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <openssl/evp.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -122,6 +126,18 @@ private:
         bool finalJob{false};
     };
 
+    struct JobOutcome {
+        bool ok{true};
+        std::size_t persistedRecords{0};
+        std::string reason;
+    };
+
+    struct EventProgress {
+        bool failed{false};
+        std::size_t persistedRecords{0};
+        std::string reason;
+    };
+
     static rclcpp::Time timestampOf(const SensorData& data) {
         return std::visit([](const auto& value) { return value.timestamp; }, data.data);
     }
@@ -169,6 +185,8 @@ private:
         output.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
         output.close();
         if (!output) {
+            std::error_code error;
+            std::filesystem::remove(temporary, error);
             return false;
         }
 
@@ -195,7 +213,7 @@ private:
                       const std::string& fileName, const Job& job) const {
         const auto& message = *camera.image;
         if (message.height == 0 || message.width == 0 || message.step == 0 ||
-            message.step * message.height > message.data.size()) {
+            static_cast<std::uint64_t>(message.step) * message.height > message.data.size()) {
             RCLCPP_WARN(logger_, "Invalid image buffer; skipping format conversion");
             return false;
         }
@@ -282,15 +300,56 @@ private:
                 job = std::move(jobs_.front());
                 jobs_.pop_front();
             }
-            writeJob(job);
+            JobOutcome outcome;
+            try {
+                outcome = writeJob(job);
+            } catch (const std::exception& error) {
+                RCLCPP_ERROR(logger_, "Unhandled storage error for %s: %s",
+                             job.directory.string().c_str(), error.what());
+                outcome = {false, 0, "storage_exception"};
+            } catch (...) {
+                RCLCPP_ERROR(logger_, "Unknown storage error for %s",
+                             job.directory.string().c_str());
+                outcome = {false, 0, "unknown_storage_exception"};
+            }
+            const auto key = job.directory.string();
+            auto& progress = eventProgress_[key];
+            progress.persistedRecords += outcome.persistedRecords;
+            if (!outcome.ok) {
+                progress.failed = true;
+                if (progress.reason.empty()) {
+                    progress.reason = outcome.reason;
+                }
+            }
+
+            if (job.finalJob) {
+                if (!progress.failed && progress.persistedRecords == 0) {
+                    progress.failed = true;
+                    progress.reason = "no_records_persisted";
+                }
+                if (!progress.failed && !writeChecksumManifest(job.directory)) {
+                    progress.failed = true;
+                    progress.reason = "checksum_manifest_failed";
+                }
+                if (progress.failed) {
+                    event_state::fail(job.directory,
+                                      progress.reason.empty() ? "storage_failed" : progress.reason);
+                } else if (!event_state::complete(job.directory, progress.persistedRecords)) {
+                    event_state::fail(job.directory, "complete_marker_write_failed");
+                }
+                eventProgress_.erase(key);
+                if (diskManager_) {
+                    diskManager_->enforceRetention();
+                }
+            }
         }
     }
 
-    void writeJob(const Job& job) const {
+    JobOutcome writeJob(const Job& job) const {
         if (diskManager_ && !diskManager_->prepareForWrite()) {
             RCLCPP_ERROR(logger_, "Insufficient disk space; dropping %zu records destined for %s",
                          job.records.size(), job.directory.string().c_str());
-            return;
+            return {false, 0, "insufficient_disk_space"};
         }
 
         std::error_code error;
@@ -298,20 +357,24 @@ private:
         if (error) {
             RCLCPP_ERROR(logger_, "Unable to create raw record directory %s: %s",
                          job.directory.string().c_str(), error.message().c_str());
-            return;
+            return {false, 0, "create_directory_failed"};
         }
 
         std::ofstream manifest(job.directory / "manifest.csv", std::ios::app);
         if (!manifest) {
             RCLCPP_ERROR(logger_, "Unable to open raw record manifest in %s",
                          job.directory.string().c_str());
-            return;
+            return {false, 0, "manifest_open_failed"};
         }
         if (manifest.tellp() == 0) {
             manifest << "sensor,timestamp,file,encoding,converted_file\n";
         }
 
-        writePairs(job.directory, job.pairs);
+        JobOutcome outcome;
+        if (!writePairs(job.directory, job.pairs)) {
+            outcome.ok = false;
+            outcome.reason = "pairs_write_failed";
+        }
 
         for (const auto& record : job.records) {
             const bool enabled =
@@ -325,13 +388,20 @@ private:
             rclcpp::SerializedMessage serialized;
             serialize(record, serialized);
             const auto& raw = serialized.get_rcl_serialized_message();
-            const auto rawFileName =
-                std::string(prefix) + "_" + std::to_string(timestamp.nanoseconds()) + ".bin";
+            const auto basePrefix =
+                std::string(prefix) + "_" + std::to_string(timestamp.nanoseconds());
+            auto recordBaseName = basePrefix;
+            std::size_t duplicate = 0;
+            while (std::filesystem::exists(job.directory / (recordBaseName + ".bin")) ||
+                   std::filesystem::exists(job.directory / (recordBaseName + ".bin.zst"))) {
+                recordBaseName = basePrefix + "_" + std::to_string(++duplicate);
+            }
+            const auto rawFileName = recordBaseName + ".bin";
             auto storedFileName = rawFileName;
             bool compressed = false;
             std::string convertedFileName;
 
-            if (job.compressionEnabled) {
+            if (job.compressionEnabled && compressionContext_ != nullptr) {
                 const auto bound = ZSTD_compressBound(raw.buffer_length);
                 std::vector<std::uint8_t> compressedData(bound);
                 // 复用压缩上下文 + 帧尾开启 XXH64 校验和, 静默位腐在解压时即可
@@ -352,12 +422,18 @@ private:
                     RCLCPP_ERROR(logger_, "Zstandard compression failed for %s: %s",
                                  rawFileName.c_str(), ZSTD_getErrorName(compressedSize));
                 }
+            } else if (job.compressionEnabled) {
+                RCLCPP_ERROR(logger_, "Zstandard compression context is unavailable; storing raw");
             }
 
             if (!compressed || job.keepRaw) {
                 if (!writeAtomically(job.directory / rawFileName, raw.buffer, raw.buffer_length)) {
                     RCLCPP_ERROR(logger_, "Unable to write raw record file: %s",
                                  rawFileName.c_str());
+                    outcome.ok = false;
+                    if (outcome.reason.empty()) {
+                        outcome.reason = "record_write_failed";
+                    }
                     continue;
                 }
             }
@@ -368,25 +444,32 @@ private:
                 std::error_code error;
                 std::filesystem::create_directories(convertedDirectory, error);
                 if (!error) {
-                    const auto baseName =
-                        std::string(prefix) + "_" + std::to_string(timestamp.nanoseconds());
                     const bool converted =
                         record.type == SensorType::CAMERA
                             ? convertImage(std::get<CameraData>(record.data), convertedDirectory,
-                                           baseName, job)
+                                           recordBaseName, job)
                             : convertPointCloud(std::get<LidarData>(record.data),
-                                                convertedDirectory, baseName, job);
+                                                convertedDirectory, recordBaseName, job);
                     if (converted) {
-                        convertedFileName = (convertedDirectory.filename() /
-                                             (baseName + (record.type == SensorType::CAMERA
-                                                              ? imageExtension(job.imageFormat)
-                                                              : ".pcd")))
-                                                .string();
+                        convertedFileName =
+                            (convertedDirectory.filename() /
+                             (recordBaseName + (record.type == SensorType::CAMERA
+                                                    ? imageExtension(job.imageFormat)
+                                                    : ".pcd")))
+                                .string();
                     }
                 }
             }
             manifest << prefix << "," << timestamp.nanoseconds() << "," << storedFileName << ","
                      << (compressed ? "zstd" : "raw") << "," << convertedFileName << "\n";
+            if (!manifest) {
+                outcome.ok = false;
+                if (outcome.reason.empty()) {
+                    outcome.reason = "manifest_write_failed";
+                }
+                break;
+            }
+            ++outcome.persistedRecords;
         }
 
         // .complete 必须在清单文件越过用户态缓冲之后写入: 否则进程在该窗口内
@@ -396,42 +479,109 @@ private:
         if (!manifest) {
             RCLCPP_ERROR(logger_, "Unable to flush raw record manifest in %s",
                          job.directory.string().c_str());
-            return;
+            outcome.ok = false;
+            if (outcome.reason.empty()) {
+                outcome.reason = "manifest_flush_failed";
+            }
         }
         manifest.close();
 
-        if (job.finalJob) {
+        if (job.finalJob && outcome.ok) {
 #ifndef _WIN32
             // 追加写的清单同样要越过页缓存, .complete 的可见性才有意义
             syncFile(job.directory / "manifest.csv");
-            if (!job.pairs.empty()) {
+            if (std::filesystem::exists(job.directory / "pairs.csv")) {
                 syncFile(job.directory / "pairs.csv");
             }
 #endif
-            writeCompletionMarker(job.directory, job.records.size());
         }
-
-        if (diskManager_) {
-            diskManager_->enforceRetention();
-        }
+        return outcome;
     }
 
-    // .complete 是事件目录写完的信号(原子写入), UploadWorker 据此启动回传
-    static void writeCompletionMarker(const std::filesystem::path& directory,
-                                      std::size_t recordCount) {
-        std::ostringstream content;
-        content << "records=" << recordCount << "\n";
-        const auto text = content.str();
-        writeAtomically(directory / ".complete", text.data(), text.size());
+    static bool sha256File(const std::filesystem::path& file, std::string& digest) {
+        std::ifstream input(file, std::ios::binary);
+        if (!input) {
+            return false;
+        }
+        EVP_MD_CTX* context = EVP_MD_CTX_new();
+        if (context == nullptr || EVP_DigestInit_ex(context, EVP_sha256(), nullptr) != 1) {
+            EVP_MD_CTX_free(context);
+            return false;
+        }
+        std::vector<char> buffer(1U << 16);
+        while (input) {
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const auto count = input.gcount();
+            if (count > 0 &&
+                EVP_DigestUpdate(context, buffer.data(), static_cast<std::size_t>(count)) != 1) {
+                EVP_MD_CTX_free(context);
+                return false;
+            }
+        }
+        if (!input.eof()) {
+            EVP_MD_CTX_free(context);
+            return false;
+        }
+        unsigned char hash[EVP_MAX_MD_SIZE];
+        unsigned int length = 0;
+        if (EVP_DigestFinal_ex(context, hash, &length) != 1) {
+            EVP_MD_CTX_free(context);
+            return false;
+        }
+        EVP_MD_CTX_free(context);
+        static constexpr char kHex[] = "0123456789abcdef";
+        digest.clear();
+        digest.reserve(length * 2);
+        for (unsigned int index = 0; index < length; ++index) {
+            digest.push_back(kHex[hash[index] >> 4]);
+            digest.push_back(kHex[hash[index] & 0x0f]);
+        }
+        return true;
     }
 
-    static void writePairs(const std::filesystem::path& directory,
+    static bool writeChecksumManifest(const std::filesystem::path& directory) {
+        std::vector<std::filesystem::path> files;
+        std::error_code iterationError;
+        for (std::filesystem::recursive_directory_iterator it(directory, iterationError), end;
+             !iterationError && it != end; it.increment(iterationError)) {
+            std::error_code error;
+            const auto name = it->path().filename().string();
+            const bool symlink = it->is_symlink(error);
+            if (!error && !symlink && it->is_regular_file(error) && !error &&
+                name != "manifest.sha256" && (name.empty() || name.front() != '.') &&
+                it->path().extension() != ".tmp") {
+                files.push_back(it->path());
+            }
+        }
+        if (iterationError) {
+            return false;
+        }
+        std::sort(files.begin(), files.end());
+        std::ostringstream manifest;
+        for (const auto& file : files) {
+            std::string digest;
+            if (!sha256File(file, digest)) {
+                return false;
+            }
+            std::error_code error;
+            const auto relative = std::filesystem::relative(file, directory, error);
+            if (error || relative.empty()) {
+                return false;
+            }
+            manifest << digest << "  " << relative.generic_string() << '\n';
+        }
+        const auto content = manifest.str();
+        return !files.empty() &&
+               writeAtomically(directory / "manifest.sha256", content.data(), content.size());
+    }
+
+    static bool writePairs(const std::filesystem::path& directory,
                            const std::vector<PairRecord>& pairs) {
         if (pairs.empty())
-            return;
+            return true;
         std::ofstream output(directory / "pairs.csv", std::ios::app);
         if (!output)
-            return;
+            return false;
         if (output.tellp() == 0) {
             output << "pair_id,status,camera_timestamp,lidar_timestamp,time_diff_ns,reason\n";
         }
@@ -442,6 +592,8 @@ private:
                    << (pair.hasLidar ? std::to_string(pair.lidarTimestamp.nanoseconds()) : "")
                    << ',' << pair.difference.nanoseconds() << ',' << pair.reason << '\n';
         }
+        output.flush();
+        return static_cast<bool>(output);
     }
 
     rclcpp::Logger logger_;
@@ -452,6 +604,7 @@ private:
     mutable ZSTD_CCtx* compressionContext_;
     std::size_t reservedJobs_{0};
     std::deque<Job> jobs_;
+    std::unordered_map<std::string, EventProgress> eventProgress_;
     std::mutex mutex_;
     std::condition_variable condition_;
     bool stopping_{false};
